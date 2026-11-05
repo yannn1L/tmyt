@@ -7,6 +7,7 @@
     "dev": "node server.js",
     "start": "node server.js",
     "build": "node --test tests/engine.test.js",
+    "build:pages": "mkdir -p _site && cp index.html _site/ && cp -r core _site/ && cp -r data _site/ && cp -r lib _site/ && touch _site/.nojekyll",
     "test": "node --test tests/engine.test.js",
     "lint": "node --check server.js && node --check core/config.js && node --check core/audio.js && node --check core/vfx.js && node --check core/faction-builder.js && node --check core/faction-registry.js && node --check core/worldstate.js && node --check core/renderer.js && node --check core/engine.js && node --check core/main.js && node --check data/ui-config.js && node --check data/sfx-data.js && node --check data/abilities.js && node --check data/factions.js && node --check data/factions/index.js"
   },

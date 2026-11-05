@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>That's my territory!</title>
+    <title>That's My Territory!</title>
+    <meta name="description" content="Retro pixel-art faction territory simulation and strategy game.">
+    <meta property="og:title" content="That's My Territory!">
+    <meta property="og:description" content="Retro pixel-art faction territory simulation and strategy game.">
     <script src="lib/pixi.min.js"></script>
     <style>
     @import url('lib/p2font.css');
@@ -12,7 +15,8 @@
             --bg: #050508; --panel: rgba(17, 17, 26, 0.85);
             --text-neon: #00ffcc;
             --border-color: #2a2a3a; --font-pixel: 'Press Start 2P', monospace;
-            --sim-scale: 1.0;
+            --sim-scale: 1.65;
+            --editor-scale: 1.0;
         }
 
         body {
@@ -23,31 +27,102 @@
         }
 
         .sim-panel { background: var(--panel); border: 1px solid var(--border-color); box-shadow: 0 0 15px rgba(0, 255, 204, 0.05), inset 0 0 20px rgba(0, 0, 0, 0.8); box-sizing: border-box; }
-        #game-container { width: 320px; height: 320px; position: relative; overflow: hidden; border: 1px solid rgba(0, 255, 204, 0.2); box-shadow: 0 0 30px rgba(0, 0, 0, 0.8), inset 0 0 10px rgba(0, 255, 204, 0.05); }
+        #game-container { width: 320px; height: 320px; position: relative; overflow: hidden; border: 1px solid rgba(0, 255, 204, 0.2); box-shadow: 0 0 30px rgba(0, 0, 0, 0.8), inset 0 0 10px rgba(0, 255, 204, 0.05); transform: scale(var(--editor-scale)); transform-origin: center center; }
         .scene { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; box-sizing: border-box; padding: 12px; z-index: 10; }
 
-        h1 { color: var(--text-neon); font-size: 14px; text-align: center; margin: 0 0 8px 0; text-shadow: var(--text-glow); line-height: 1.4; }
-        .btn { background: rgba(0, 255, 204, 0.1); color: var(--text-neon); border: 1px solid var(--text-neon); padding: 10px 12px; font-size: 10px; cursor: pointer; text-shadow: var(--text-glow); box-shadow: inset 0 0 5px rgba(0,255,204,0.2); transition: all 0.1s; margin-top: 8px; width: 100%; text-align: center; font-family: inherit; }
+        h1 { color: var(--text-neon); font-size: 12px; text-align: center; margin: 0 0 4px 0; text-shadow: var(--text-glow); line-height: 1.3; }
+        .btn { background: rgba(0, 255, 204, 0.1); color: var(--text-neon); border: 1px solid var(--text-neon); padding: 8px 10px; font-size: 9px; cursor: pointer; text-shadow: var(--text-glow); box-shadow: inset 0 0 5px rgba(0,255,204,0.2); transition: all 0.1s; margin-top: 6px; width: 100%; text-align: center; font-family: inherit; box-sizing: border-box; }
         .btn:hover:not(:disabled) { background: var(--text-neon); color: #000; box-shadow: 0 0 15px var(--text-neon); }
         .btn:active:not(:disabled) { transform: scale(0.98); }
         .btn:disabled { color: #555; border-color: #333; background: transparent; text-shadow: none; box-shadow: none; cursor: not-allowed; }
-        .subtitle { font-size: 8px; color: #888; margin-bottom: 10px; text-align: center; line-height: 1.5; }
+        .subtitle { font-size: 7px; color: #888; margin-bottom: 6px; text-align: center; line-height: 1.4; }
 
         ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: rgba(0,0,0,0.5); } ::-webkit-scrollbar-thumb { background: rgba(0, 255, 204, 0.3); border-radius: 2px; } ::-webkit-scrollbar-thumb:hover { background: rgba(0, 255, 204, 0.6); }
 
-        .unit-list { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; overflow-y: auto; max-height: 205px; padding-right: 4px; align-items: start; }
-        .unit-item { background: rgba(0, 0, 0, 0.5); padding: 6px; display: flex; flex-direction: column; gap: 4px; cursor: pointer; border: 1px solid var(--border-color); border-top: 2px solid var(--border-color); transition: all 0.1s; border-radius: 4px; height: 100%; box-sizing: border-box; }
+        #scene-editor { justify-content: flex-start; padding: 8px 10px; gap: 4px; }
+        .editor-top-bar { width: 100%; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 4px; }
+        .editor-title { font-size: 8px; color: var(--text-neon); letter-spacing: 0.5px; }
+        .editor-tabs { display: flex; gap: 3px; }
+        .editor-tab-btn { background: rgba(0, 0, 0, 0.6); color: #888; border: 1px solid var(--border-color); padding: 3px 5px; font-size: 5.5px; font-family: inherit; cursor: pointer; transition: all 0.1s; }
+        .editor-tab-btn:hover { color: #fff; border-color: #666; }
+        .editor-tab-btn.active { background: rgba(0, 255, 204, 0.15); color: var(--text-neon); border-color: var(--text-neon); box-shadow: inset 0 0 6px rgba(0, 255, 204, 0.25); }
+
+        .arena-config-bar { width: 100%; background: rgba(0, 0, 0, 0.45); border: 1px solid var(--border-color); border-radius: 3px; padding: 4px 6px; box-sizing: border-box; display: flex; flex-direction: column; gap: 3px; }
+        .arena-config-header { display: flex; justify-content: space-between; align-items: center; width: 100%; gap: 4px; }
+        .arena-config-label { font-size: 5.5px; color: #aaa; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .arena-config-label strong { color: var(--text-neon); }
+        .arena-presets { display: flex; gap: 2px; flex-shrink: 0; }
+        .preset-btn { background: rgba(255, 255, 255, 0.04); color: #888; border: 1px solid #333; padding: 2px 3px; font-size: 5px; font-family: inherit; cursor: pointer; border-radius: 2px; white-space: nowrap; }
+        .preset-btn:hover { color: #fff; border-color: #666; }
+        .preset-btn.active { background: rgba(0, 255, 204, 0.2); color: var(--text-neon); border-color: var(--text-neon); }
+        .grid-sliders-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; align-items: center; width: 100%; }
+        .grid-slider-group { display: flex; align-items: center; gap: 4px; font-size: 5px; color: #999; font-variant-numeric: tabular-nums; }
+        .grid-slider-group span { min-width: 28px; }
+        .grid-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; background: #1c1c28; border: 1px solid #333; outline: none; border-radius: 2px; cursor: pointer; }
+        .grid-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 8px; height: 8px; background: var(--text-neon); border: none; border-radius: 1px; cursor: pointer; }
+
+        #editor-roster-panel { width: 100%; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+        .unit-list { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; overflow-y: auto; flex: 1; min-height: 0; padding-right: 3px; align-items: start; }
+        .unit-item { position: relative; background: rgba(0, 0, 0, 0.5); padding: 6px; display: flex; flex-direction: column; gap: 4px; cursor: pointer; border: 1px solid var(--border-color); border-top: 2px solid var(--border-color); transition: all 0.1s; border-radius: 4px; height: 100%; box-sizing: border-box; }
         .unit-item:hover { background: rgba(255, 255, 255, 0.05); }
+        .unit-item:focus-visible { outline: 1px solid var(--text-neon); }
         .unit-item.selected { border-color: var(--text-neon); border-top-width: 3px; background: rgba(0, 255, 204, 0.08); box-shadow: inset 0 0 10px rgba(0, 255, 204, 0.15); }
 
         .unit-header { display: flex; justify-content: space-between; align-items: flex-start; width: 100%; }
         .unit-emote { font-size: 14px; font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', sans-serif; filter: drop-shadow(2px 2px 0px rgba(0,0,0,0.8)); margin-right: 4px; }
 
-        .unit-title-stats { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+        .unit-title-stats { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; font-variant-numeric: tabular-nums; }
         .unit-name { font-size: 7px; text-shadow: 1px 1px 0 #000; letter-spacing: 0.5px; }
         .unit-stats { font-size: 6px; }
+        .unit-badge-row { display: flex; justify-content: space-between; align-items: center; width: 100%; gap: 3px; }
         .unit-skill-badge { align-self: flex-start; font-size: 5px; padding: 3px 4px; border-radius: 2px; letter-spacing: 0.5px; text-transform: uppercase; }
-        .unit-desc-long { font-size: 1px; color: #bbb; line-height: 1.4; }
+        .unit-del-btn { background: rgba(255, 68, 68, 0.15); color: #ff6b6b; border: 1px solid #ff6b6b; padding: 2px 4px; font-size: 5px; font-family: inherit; cursor: pointer; border-radius: 2px; }
+        .unit-del-btn:hover { background: #ff5555; color: #000; }
+        .unit-desc-long { font-size: 6px; color: #bbb; line-height: 1.4; }
+
+        #editor-settings-panel { width: 100%; display: none; flex-direction: column; gap: 5px; flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
+        .settings-group { background: rgba(0, 0, 0, 0.5); border: 1px solid var(--border-color); border-radius: 3px; padding: 5px 6px; display: flex; flex-direction: column; gap: 4px; }
+        .settings-row { display: flex; justify-content: space-between; align-items: center; gap: 6px; width: 100%; }
+        .settings-label { font-size: 5.5px; color: #ccc; }
+        .settings-sub { font-size: 4.8px; color: #777; }
+        .settings-seg-group { display: flex; gap: 2px; }
+        .settings-seg-btn { background: rgba(255, 255, 255, 0.05); color: #888; border: 1px solid #333; padding: 3px 5px; font-size: 5px; font-family: inherit; cursor: pointer; border-radius: 2px; }
+        .settings-seg-btn:hover { color: #fff; border-color: #666; }
+        .settings-seg-btn.active { background: rgba(0, 255, 204, 0.18); color: var(--text-neon); border-color: var(--text-neon); }
+        #settings-status { font-size: 5.5px; color: #00ffcc; min-height: 9px; text-align: center; }
+
+        #editor-dev-panel { width: 100%; display: none; flex-direction: column; gap: 4px; flex: 1; min-height: 0; }
+        .dev-debug-row { display: flex; justify-content: space-between; align-items: center; background: rgba(0, 0, 0, 0.5); border: 1px solid var(--border-color); padding: 4px 6px; border-radius: 3px; }
+        .dev-debug-info { display: flex; flex-direction: column; gap: 2px; }
+        .dev-debug-title { font-size: 5.5px; color: #ffcc00; }
+        .dev-debug-sub { font-size: 4.8px; color: #888; }
+        .debug-toggle-btn { background: rgba(255, 255, 255, 0.05); color: #888; border: 1px solid #444; padding: 3px 6px; font-size: 5.5px; font-family: inherit; cursor: pointer; border-radius: 2px; min-width: 44px; text-align: center; }
+        .debug-toggle-btn.active { background: rgba(255, 204, 0, 0.2); color: #ffcc00; border-color: #ffcc00; box-shadow: 0 0 8px rgba(255, 204, 0, 0.3); }
+
+        .dev-saved-bar { background: rgba(0, 0, 0, 0.45); border: 1px solid var(--border-color); border-radius: 3px; padding: 3px 5px; display: flex; flex-direction: column; gap: 3px; }
+        .dev-saved-header { display: flex; justify-content: space-between; align-items: center; font-size: 5px; color: #999; }
+        .dev-saved-list { display: flex; flex-wrap: wrap; gap: 3px; max-height: 30px; overflow-y: auto; align-items: center; }
+        .dev-saved-empty { font-size: 5px; color: #666; }
+        .saved-fac-item { display: inline-flex; align-items: center; gap: 2px; background: rgba(255, 255, 255, 0.06); border: 1px solid #444; border-radius: 2px; padding: 1px 3px; font-size: 5px; color: #ddd; }
+        .saved-fac-load { background: transparent; border: none; color: inherit; font-family: inherit; font-size: 5px; cursor: pointer; padding: 1px 2px; }
+        .saved-fac-load:hover { color: var(--text-neon); }
+        .saved-fac-del { background: rgba(255, 68, 68, 0.2); border: none; color: #ff6b6b; font-family: inherit; font-size: 5px; cursor: pointer; padding: 1px 3px; border-radius: 1px; }
+        .saved-fac-del:hover { background: #ff5555; color: #000; }
+
+        .dev-code-wrap { display: flex; flex-direction: column; gap: 3px; flex: 1; min-height: 0; }
+        .dev-code-header { display: flex; justify-content: space-between; align-items: center; font-size: 5px; color: #aaa; }
+        #dev-faction-code { width: 100%; flex: 1; min-height: 0; resize: none; background: #07070c; color: #a8ffdb; border: 1px solid var(--border-color); border-radius: 3px; padding: 4px; font-family: 'Courier New', Consolas, monospace; font-size: 7.5px; line-height: 1.25; box-sizing: border-box; outline: none; user-select: text; tab-size: 2; }
+        #dev-faction-code:focus { border-color: var(--text-neon); }
+        .dev-btn-row { display: flex; gap: 3px; width: 100%; }
+        .dev-action-btn { flex: 1; background: rgba(0, 255, 204, 0.12); color: var(--text-neon); border: 1px solid var(--text-neon); padding: 4px 5px; font-size: 5.5px; font-family: inherit; cursor: pointer; border-radius: 2px; text-align: center; }
+        .dev-action-btn:hover { background: var(--text-neon); color: #000; }
+        .dev-action-btn.danger { flex: 0 0 auto; background: rgba(255, 85, 85, 0.12); color: #ff6b6b; border-color: #ff6b6b; }
+        .dev-action-btn.danger:hover { background: #ff5555; color: #000; }
+        .dev-action-btn.secondary { flex: 0 0 auto; background: rgba(255, 255, 255, 0.05); color: #aaa; border-color: #444; }
+        .dev-action-btn.secondary:hover { background: #333; color: #fff; }
+        #dev-code-status { font-size: 5px; min-height: 9px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 1px 2px; }
+        #dev-code-status.ok { color: #00ffcc; }
+        #dev-code-status.err { color: #ff5555; }
 
         #loading-bar { width: 100%; height: 8px; border: 1px solid var(--border-color); margin-top: 15px; background: rgba(0,0,0,0.5); }
         #loading-fill { width: 0%; height: 100%; background: var(--text-neon); box-shadow: var(--text-glow); transition: width 0.1s; }
@@ -70,11 +145,25 @@
         #sim-canvas-wrap { position: relative; width: 320px; height: 320px; padding: 0; box-shadow: 0 0 20px rgba(0,0,0,0.8), inset 0 0 10px rgba(0,255,204,0.1); border: 1px solid rgba(0, 255, 204, 0.2); }
         #pixi-container canvas { display: block; width: 100%; height: 100%; }
 
+        #sim-debug-overlay {
+            position: absolute; top: 4px; left: 4px; z-index: 22;
+            background: rgba(5, 5, 10, 0.84); border: 1px solid rgba(255, 204, 0, 0.65);
+            padding: 4px 6px; border-radius: 3px; pointer-events: none;
+            font-size: 5.5px; line-height: 1.45; color: #e2e8f0;
+            font-variant-numeric: tabular-nums; display: none;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.85);
+            min-width: 128px;
+        }
+        .dbg-title { color: #ffcc00; font-size: 6px; border-bottom: 1px dashed rgba(255, 204, 0, 0.35); margin-bottom: 2px; padding-bottom: 1px; letter-spacing: 0.5px; }
+        .dbg-row { display: flex; justify-content: space-between; gap: 8px; }
+        .dbg-lbl { color: #94a3b8; }
+        .dbg-val { color: #00ffcc; }
+
         #sim-header { width: 100%; padding: 12px; text-align: center; border-top: 2px solid var(--text-neon); }
         #sim-header h1 { margin: 0; font-size: 12px; letter-spacing: 1px; display: flex; justify-content: center; align-items: center; }
 
         #sim-footer { width: 100%; max-height: 180px; overflow-y: auto; padding: 10px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; align-items: start; border-bottom: 2px solid var(--text-neon); }
-        .stat-card { width: 92px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); padding: 4px 6px; display: flex; flex-direction: column; gap: 4px; border-radius: 4px; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); box-sizing: border-box; transition: border-color 0.2s; }
+        .stat-card { width: 92px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); padding: 4px 6px; display: flex; flex-direction: column; gap: 4px; border-radius: 4px; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); box-sizing: border-box; transition: border-color 0.2s; font-variant-numeric: tabular-nums; }
         .stat-card-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed rgba(255,255,255,0.1); padding-bottom: 2px; }
 
         .stat-card-emote { font-size: 12px; font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', sans-serif; }
@@ -97,19 +186,136 @@
         @keyframes speedPop { 0% { transform: translate(-50%, -50%) scale(0); opacity: 0; } 20% { transform: translate(-50%, -50%) scale(1.3) rotate(-5deg); opacity: 1; } 40% { transform: translate(-50%, -50%) scale(1) rotate(2deg); } 80% { transform: translate(-50%, -50%) scale(1) translateY(0); opacity: 1; } 100% { transform: translate(-50%, -50%) scale(1.5) translateY(-30px); opacity: 0; } }
     </style>
 </head>
-<body>
+<body data-state="title">
 
 <div id="game-container" class="sim-panel">
     <div class="hud-corner top-left"></div><div class="hud-corner top-right"></div>
     <div class="hud-corner bottom-left"></div><div class="hud-corner bottom-right"></div>
     <div id="scene-loading" class="scene">
-        <h1>SYSTEM<br>BOOTING</h1><div class="subtitle" id="boot-status">Loading modules...</div>
+        <h1>SYSTEM<br>BOOTING</h1><div class="subtitle" id="boot-status">Loading ES modules...</div>
         <div id="loading-bar"><div id="loading-fill"></div></div>
     </div>
     <div id="scene-editor" class="scene" style="display: none;">
-        <h1>EDITOR SCENE</h1><div class="subtitle">Select at least 3 classes to begin</div>
-        <div class="unit-list" id="unit-selection"></div>
-        <button class="btn" id="btn-start" disabled>INITIALIZE SIMULATION!</button>
+        <div class="editor-top-bar">
+            <span class="editor-title">EDITOR</span>
+            <div class="editor-tabs" role="tablist">
+                <button type="button" class="editor-tab-btn active" id="tab-btn-roster" role="tab" aria-selected="true">ROSTER</button>
+                <button type="button" class="editor-tab-btn" id="tab-btn-settings" role="tab" aria-selected="false">SETTINGS</button>
+                <button type="button" class="editor-tab-btn" id="tab-btn-dev" role="tab" aria-selected="false">DEV MODE</button>
+            </div>
+        </div>
+
+        <div class="arena-config-bar" id="arena-config-bar">
+            <div class="arena-config-header">
+                <span class="arena-config-label">ARENA: <strong id="arena-dim-label">20×20</strong> (<span id="arena-cells-label">400</span>)</span>
+                <div class="arena-presets">
+                    <button type="button" class="preset-btn" data-cols="10" data-rows="10">10×10</button>
+                    <button type="button" class="preset-btn" data-cols="16" data-rows="16">16×16</button>
+                    <button type="button" class="preset-btn active" data-cols="20" data-rows="20">20×20</button>
+                    <button type="button" class="preset-btn" data-cols="32" data-rows="32">32×32</button>
+                    <button type="button" class="preset-btn" data-cols="40" data-rows="40">40×40</button>
+                </div>
+            </div>
+            <div class="grid-sliders-row">
+                <label class="grid-slider-group">
+                    <span>C:<b id="val-grid-cols">20</b></span>
+                    <input type="range" class="grid-slider" id="slider-grid-cols" min="8" max="40" step="1" value="20">
+                </label>
+                <label class="grid-slider-group">
+                    <span>R:<b id="val-grid-rows">20</b></span>
+                    <input type="range" class="grid-slider" id="slider-grid-rows" min="8" max="40" step="1" value="20">
+                </label>
+            </div>
+        </div>
+
+        <div id="editor-roster-panel">
+            <div class="subtitle" id="roster-subtitle">Select at least 2 classes (<span id="selected-count-label">0</span> selected)</div>
+            <div class="unit-list" id="unit-selection"></div>
+        </div>
+
+        <div id="editor-settings-panel">
+            <div class="settings-group">
+                <div class="settings-row">
+                    <div>
+                        <div class="settings-label">BASE TICK SPEED</div>
+                        <div class="settings-sub">Initial simulation step interval</div>
+                    </div>
+                    <div class="settings-seg-group" id="settings-tick-group">
+                        <button type="button" class="settings-seg-btn" data-tick-ms="75">FAST</button>
+                        <button type="button" class="settings-seg-btn active" data-tick-ms="150">NORM</button>
+                        <button type="button" class="settings-seg-btn" data-tick-ms="250">SLOW</button>
+                    </div>
+                </div>
+                <div class="settings-row">
+                    <div>
+                        <div class="settings-label">SPEEDUP ESCALATION</div>
+                        <div class="settings-sub">Time between 2x speed boosts</div>
+                    </div>
+                    <div class="settings-seg-group" id="settings-speedup-group">
+                        <button type="button" class="settings-seg-btn" data-speedup-ms="5000">5S</button>
+                        <button type="button" class="settings-seg-btn active" data-speedup-ms="10000">10S</button>
+                        <button type="button" class="settings-seg-btn" data-speedup-ms="15000">15S</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-group">
+                <div class="settings-row">
+                    <div>
+                        <div class="settings-label">SFX AUDIO</div>
+                        <div class="settings-sub">Synthesized retro sound effects</div>
+                    </div>
+                    <button type="button" class="settings-seg-btn active" id="btn-setting-audio" aria-pressed="true">ON</button>
+                </div>
+                <div class="settings-row">
+                    <div>
+                        <div class="settings-label">CRT &amp; SCREEN SHAKE</div>
+                        <div class="settings-sub">Scanline shader &amp; impact shake</div>
+                    </div>
+                    <button type="button" class="settings-seg-btn active" id="btn-setting-crt" aria-pressed="true">ON</button>
+                </div>
+            </div>
+
+            <div class="dev-btn-row">
+                <button type="button" class="dev-action-btn" id="btn-save-settings">SAVE SETTINGS</button>
+                <button type="button" class="dev-action-btn secondary" id="btn-reset-settings">RESET DEFAULTS</button>
+            </div>
+            <div id="settings-status">Arena &amp; simulation settings auto-saved.</div>
+        </div>
+
+        <div id="editor-dev-panel">
+            <div class="dev-debug-row">
+                <div class="dev-debug-info">
+                    <span class="dev-debug-title">DEBUGGING INSPECTION</span>
+                    <span class="dev-debug-sub">Show live FPS, particles &amp; engine stats</span>
+                </div>
+                <button type="button" class="debug-toggle-btn" id="btn-toggle-debug" aria-pressed="false">OFF</button>
+            </div>
+
+            <div class="dev-saved-bar">
+                <div class="dev-saved-header">
+                    <span>SAVED CUSTOM FACTIONS (<b id="saved-factions-count">0</b>)</span>
+                </div>
+                <div class="dev-saved-list" id="dev-saved-list">
+                    <span class="dev-saved-empty">No saved custom factions yet.</span>
+                </div>
+            </div>
+
+            <div class="dev-code-wrap">
+                <div class="dev-code-header">
+                    <span>CUSTOM FACTION CODE (defineFaction)</span>
+                </div>
+                <textarea id="dev-faction-code" spellcheck="false" aria-label="Custom Faction JavaScript Code"></textarea>
+                <div class="dev-btn-row">
+                    <button type="button" class="dev-action-btn" id="btn-load-faction">SAVE &amp; LOAD</button>
+                    <button type="button" class="dev-action-btn danger" id="btn-delete-faction">DELETE</button>
+                    <button type="button" class="dev-action-btn secondary" id="btn-template-faction">TEMPLATE</button>
+                </div>
+                <div id="dev-code-status">Paste defineFaction({...}) code &amp; click SAVE &amp; LOAD.</div>
+            </div>
+        </div>
+
+        <button class="btn" id="btn-start" data-start="true" disabled>INITIALIZE SIMULATION!</button>
     </div>
 </div>
 
@@ -121,6 +327,7 @@
             <div class="hud-corner top-left"></div><div class="hud-corner top-right"></div>
             <div class="hud-corner bottom-left"></div><div class="hud-corner bottom-right"></div>
 
+            <div id="sim-debug-overlay"></div>
             <div id="speedup-overlay">SPEED 2X!</div>
             <div id="pixi-container" style="width: 100%; height: 100%;"></div>
             <div id="winner-overlay"><h1 id="winner-text">WINNER!</h1></div>
@@ -130,178 +337,7 @@
     </div>
 </div>
 
-<!-- ====================================================================
-     BLOB LOADER — fetch + inject serial with retry.
-     Solusi anti-race untuk Android WebView / Spck Editor.
-
-     Kenapa ini bekerja:
-     - fetch() → ambil text → Blob → URL.createObjectURL → inject <script>
-     - Serial (tunggu file 1 selesai sebelum file 2)
-     - Retry 3x dengan exponential backoff
-     - Timeout 10s per file
-     - Blob URL tidak kena cache, tidak butuh server reliable
-     ==================================================================== -->
-<script>
-(function() {
-    'use strict';
-
-    var FILES = [
-        'data/ui-config.js',
-        'data/sfx-data.js',
-        'data/abilities.js', // ← Parts (harus sebelum factions)
-        'data/factions.js', // ← Faction data
-        'core/config.js',
-        'core/audio.js',
-        'core/vfx.js',
-        'core/faction-registry.js', // ← BARU: Compiler + Registry
-        'core/worldstate.js',
-        'core/renderer.js',
-        'core/engine.js',
-        'core/main.js'
-    ];
-
-    var MAX_RETRIES = 3;
-    var TIMEOUT_MS = 10000;
-    var loaded = [];
-
-    var statusEl = document.getElementById('boot-status');
-    var fillEl = document.getElementById('loading-fill');
-
-    function setStatus(msg) {
-        if (statusEl) statusEl.textContent = msg;
-    }
-
-    function setProgress(pct) {
-        if (fillEl) fillEl.style.width = pct + '%';
-    }
-
-    /**
-     * Fetch a script file with timeout + retry.
-     * Returns Promise<string> (script source text).
-     */
-    function fetchScript(src, retriesLeft) {
-        return new Promise(function(resolve, reject) {
-            var timedOut = false;
-            var timeoutHandle = setTimeout(function() {
-                timedOut = true;
-                handleError(new Error('Timeout after ' + TIMEOUT_MS + 'ms'));
-            }, TIMEOUT_MS);
-
-            function handleError(err) {
-                clearTimeout(timeoutHandle);
-                if (retriesLeft > 0 && !timedOut) {
-                    var waitMs = 150 * (MAX_RETRIES - retriesLeft + 1);
-                    console.warn('[LOADER] Retry (' + retriesLeft + ') ' + src + ' in ' + waitMs + 'ms');
-                    setTimeout(function() {
-                        fetchScript(src, retriesLeft - 1).then(resolve, reject);
-                    }, waitMs);
-                } else {
-                    reject(new Error('Failed to load ' + src + ': ' + err.message));
-                }
-            }
-
-            // Use fetch with cache: 'no-store' to bypass cache issues
-            fetch(src, { cache: 'no-store' })
-                .then(function(resp) {
-                    if (!resp.ok) {
-                        throw new Error('HTTP ' + resp.status + ' ' + resp.statusText);
-                    }
-                    return resp.text();
-                })
-                .then(function(text) {
-                    clearTimeout(timeoutHandle);
-                    if (!text || text.length < 10) {
-                        throw new Error('Empty/too-short response (' + (text ? text.length : 0) + ' bytes)');
-                    }
-                    resolve(text);
-                })
-                .catch(function(err) {
-                    if (timedOut) return; // already handled
-                    handleError(err);
-                });
-        });
-    }
-
-    /**
-     * Inject script source via Blob URL.
-     * This bypasses file:// cache, MIME sniffing issues, etc.
-     */
-    function injectScript(src, sourceText) {
-        return new Promise(function(resolve, reject) {
-            try {
-                var blob = new Blob([sourceText], { type: 'application/javascript' });
-                var url = URL.createObjectURL(blob);
-                var script = document.createElement('script');
-                script.src = url;
-                script.async = false;
-
-                script.onload = function() {
-                    URL.revokeObjectURL(url);
-                    resolve(src);
-                };
-                script.onerror = function() {
-                    URL.revokeObjectURL(url);
-                    reject(new Error('Runtime error in ' + src));
-                };
-
-                document.head.appendChild(script);
-            } catch (e) {
-                reject(e);
-            }
-        });
-    }
-
-    async function loadAll() {
-        var total = FILES.length;
-        setStatus('Loading 0/' + total);
-
-        for (var i = 0; i < total; i++) {
-            var f = FILES[i];
-            setStatus('Loading ' + (i + 1) + '/' + total + ': ' + f.split('/').pop());
-            setProgress((i / total) * 100);
-
-            try {
-                var text = await fetchScript(f, MAX_RETRIES);
-                await injectScript(f, text);
-                loaded.push(f);
-                console.log('[LOADER] ✓ ' + (i + 1) + '/' + total + ' ' + f);
-            } catch (e) {
-                console.error('[LOADER] ✗ FATAL: ' + f);
-                console.error('  ' + e.message);
-                showFatalError(f, e);
-                return;
-            }
-        }
-
-        setStatus('Ready!');
-        setProgress(100);
-        console.log('[LOADER] All ' + total + ' files loaded.');
-        // main.js auto-boots itself (DOMContentLoaded or immediate)
-    }
-
-    function showFatalError(file, err) {
-        var container = document.getElementById('scene-loading');
-        if (container) {
-            container.innerHTML =
-                '<h1 style="color:#ff2a2a;">LOAD ERROR</h1>' +
-                '<div class="subtitle" style="color:#ff8888;">' +
-                    'File: ' + file + '<br><br>' +
-                    err.message + '<br><br>' +
-                    'Loaded: ' + loaded.length + '/' + FILES.length +
-                '</div>' +
-                '<button class="btn" onclick="location.reload()">RETRY</button>';
-        }
-        console.error('[LOADER FATAL]', file, err);
-    }
-
-    // Start loading after DOM ready
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', loadAll);
-    } else {
-        loadAll();
-    }
-})();
-</script>
+<script type="module" src="./core/main.js"></script>
 
 </body>
 </html>

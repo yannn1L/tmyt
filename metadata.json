@@ -1,0 +1,8 @@
+{
+  "name": "That's My Territory!",
+  "description": "Retro pixel-art faction territory simulation and strategy game.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

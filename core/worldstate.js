@@ -1,22 +1,33 @@
 /**
- * WORLD STATE — Grid, layers, power, stuck monitor + resolver.
- * 
- * FIX v6:
- *   - applyStuckResolver level 2: guard capturedThisTick (cegah overwrite)
- *   - applyStuckResolver level 3: mark capturedThisTick di force convert
- *   - Robust power cache
- *   - Speed-aware stuck monitor (fast path < 32x)
- *   - Zero additional grid scan
+ * WORLD STATE — Flat TypedArray grid, layer activity tracking, zero-GC power calculation,
+ * and speed-aware stuck resolver.
  */
-'use strict';
 
-var WorldState = {
+import { CONFIG, Utils } from './config.js';
+import { FACTIONS, FACTION_COUNT } from '../data/factions.js';
+import { VFX } from './vfx.js';
+import { AudioService } from './audio.js';
+
+// Pre-allocated modifier context to avoid per-calcPower object allocations
+var _modCtx = {
+    ws: null,
+    idx: 0,
+    fac: null,
+    isDefending: false,
+    modifier: null
+};
+
+export const WorldState = {
     factions: {},
     activeFactions: [],
     grid: new Int8Array(CONFIG.GRID.TOTAL).fill(-1),
     nextGrid: new Int8Array(CONFIG.GRID.TOTAL).fill(-1),
     changes: 0,
     layers: {},
+    layerHasActiveCells: Object.create(null),
+    layerActiveList: Object.create(null),
+    layerActiveCount: Object.create(null),
+    layerInActiveSet: Object.create(null),
     winPending: false,
     lastOneTriggered: false,
     domCache: {},
@@ -45,7 +56,7 @@ var WorldState = {
 
     _pendingShake: 0,
 
-    // ---- Stuck Monitor State ----
+    // Stuck Monitor State
     _stuck: {
         counter: 0,
         dominantFaction: -1,
@@ -58,10 +69,6 @@ var WorldState = {
         decayBoost: 1.0,
         rngVarianceBoost: 1.0
     },
-
-    // ========================================================================
-    // SHARED UTILITIES
-    // ========================================================================
 
     requestShake: function(amount) {
         if (amount > this._pendingShake) this._pendingShake = amount;
@@ -78,19 +85,143 @@ var WorldState = {
         this.soundQueue[sfxName] = 1;
     },
 
-    // ========================================================================
-    // LAYER & POWER
-    // ========================================================================
+    ensureLayerBuffers: function(layerKey) {
+        var total = CONFIG.GRID.TOTAL;
+        if (!this.layers[layerKey] || this.layers[layerKey].length !== total) {
+            this.layers[layerKey] = new Int16Array(total);
+            this.layerActiveList[layerKey] = new Uint16Array(total);
+            this.layerInActiveSet[layerKey] = new Uint8Array(total);
+            this.layerActiveCount[layerKey] = 0;
+            this.layerHasActiveCells[layerKey] = false;
+            if (this._layerKeys.indexOf(layerKey) === -1) {
+                this._layerKeys.push(layerKey);
+            }
+        }
+        return this.layers[layerKey];
+    },
+
+    trackActiveLayerCell: function(layerKey, idx) {
+        var inSet = this.layerInActiveSet[layerKey];
+        if (!inSet) {
+            this.ensureLayerBuffers(layerKey);
+            inSet = this.layerInActiveSet[layerKey];
+        }
+        if (inSet[idx] === 0) {
+            inSet[idx] = 1;
+            var c = this.layerActiveCount[layerKey] | 0;
+            this.layerActiveList[layerKey][c] = idx;
+            this.layerActiveCount[layerKey] = c + 1;
+        }
+        this.layerHasActiveCells[layerKey] = true;
+    },
+
+    setLayerValue: function(layerKey, idx, val) {
+        var layer = this.ensureLayerBuffers(layerKey);
+        var nv = val > 0 ? (val | 0) : 0;
+        layer[idx] = nv;
+        if (nv > 0) {
+            var inSet = this.layerInActiveSet[layerKey];
+            if (inSet[idx] === 0) {
+                inSet[idx] = 1;
+                var c = this.layerActiveCount[layerKey] | 0;
+                this.layerActiveList[layerKey][c] = idx;
+                this.layerActiveCount[layerKey] = c + 1;
+            }
+            this.layerHasActiveCells[layerKey] = true;
+        }
+        return nv;
+    },
+
+    addLayerValue: function(layerKey, idx, delta, maxVal) {
+        var layer = this.ensureLayerBuffers(layerKey);
+        var cap = maxVal !== undefined ? maxVal : 100;
+        var next = layer[idx] + delta;
+        if (next > cap) next = cap;
+        if (next < 0) next = 0;
+        layer[idx] = next;
+        if (next > 0) {
+            var inSet = this.layerInActiveSet[layerKey];
+            if (inSet[idx] === 0) {
+                inSet[idx] = 1;
+                var c = this.layerActiveCount[layerKey] | 0;
+                this.layerActiveList[layerKey][c] = idx;
+                this.layerActiveCount[layerKey] = c + 1;
+            }
+            this.layerHasActiveCells[layerKey] = true;
+        }
+        return next;
+    },
+
+    clearLayer: function(layerKey) {
+        var arr = this.layers[layerKey];
+        if (!arr) return;
+        var list = this.layerActiveList[layerKey];
+        var inSet = this.layerInActiveSet[layerKey];
+        var count = this.layerActiveCount[layerKey] | 0;
+        if (list && inSet && count > 0) {
+            for (var i = 0; i < count; i++) {
+                var idx = list[i];
+                arr[idx] = 0;
+                inSet[idx] = 0;
+            }
+        } else {
+            arr.fill(0);
+            if (inSet) inSet.fill(0);
+        }
+        this.layerActiveCount[layerKey] = 0;
+        this.layerHasActiveCells[layerKey] = false;
+    },
+
+    syncLayerActiveList: function(layerKey) {
+        var arr = this.layers[layerKey];
+        if (!arr) return 0;
+        var list = this.layerActiveList[layerKey];
+        var inSet = this.layerInActiveSet[layerKey];
+        if (!list || !inSet) {
+            this.ensureLayerBuffers(layerKey);
+            list = this.layerActiveList[layerKey];
+            inSet = this.layerInActiveSet[layerKey];
+        }
+        inSet.fill(0);
+        var count = 0;
+        var len = arr.length;
+        for (var i = 0; i < len; i++) {
+            if (arr[i] > 0) {
+                inSet[i] = 1;
+                list[count++] = i;
+            }
+        }
+        this.layerActiveCount[layerKey] = count;
+        this.layerHasActiveCells[layerKey] = count > 0;
+        return count;
+    },
+
+    markLayerActive: function(layerKey, idx) {
+        this.layerHasActiveCells[layerKey] = true;
+        if (idx !== undefined) {
+            this.trackActiveLayerCell(layerKey, idx);
+        } else if ((this.layerActiveCount[layerKey] | 0) === 0 && this.layers[layerKey]) {
+            this.syncLayerActiveList(layerKey);
+        }
+    },
 
     initLayers: function() {
-        for (var i = 0; i < FACTION_COUNT; i++) {
+        var total = CONFIG.GRID.TOTAL;
+        var fCount = FACTIONS.length;
+        for (var i = 0; i < fCount; i++) {
             var f = FACTIONS[i];
-            this.layers[f.key] = new Int16Array(CONFIG.GRID.TOTAL);
+            this.factions[f.id] = f;
+            this.ensureLayerBuffers(f.key);
             if (f.params && f.params.extraLayers) {
                 for (var j = 0; j < f.params.extraLayers.length; j++) {
-                    this.layers[f.params.extraLayers[j]] = new Int16Array(CONFIG.GRID.TOTAL);
+                    this.ensureLayerBuffers(f.params.extraLayers[j]);
                 }
             }
+        }
+        // Reallocate existing dynamic custom layers if total changed
+        var existingKeys = Object.keys(this.layers);
+        for (var k = 0; k < existingKeys.length; k++) {
+            this.ensureLayerBuffers(existingKeys[k]);
         }
         this._layerKeys = Object.keys(this.layers);
 
@@ -101,6 +232,39 @@ var WorldState = {
             if (hLayer) hazardLayers.push(hLayer);
         }
         CONFIG.HAZARD_LAYERS = hazardLayers;
+    },
+
+    syncBuffers: function() {
+        var total = CONFIG.GRID.TOTAL;
+        var fCount = Math.max(FACTIONS.length, 16);
+
+        if (this.grid.length !== total) {
+            this.grid = new Int8Array(total).fill(-1);
+            this.nextGrid = new Int8Array(total).fill(-1);
+            this.capturedThisTick = new Uint8Array(total);
+        }
+        if (this.lastCounts.length < FACTIONS.length) {
+            this.lastCounts = new Int32Array(fCount);
+        }
+
+        var cacheLen = total * fCount;
+        if (this._powerCacheAtk.length < cacheLen) {
+            this._powerCacheAtk = new Float32Array(cacheLen);
+            this._powerCacheDef = new Float32Array(cacheLen);
+            this._powerCacheCritAtk = new Uint8Array(cacheLen);
+            this._powerCacheTickAtk = new Int32Array(cacheLen).fill(-1);
+            this._powerCacheTickDef = new Int32Array(cacheLen).fill(-1);
+        }
+
+        this.initLayers();
+    },
+
+    resize: function(cols, rows) {
+        if (cols !== undefined && rows !== undefined) {
+            CONFIG.setGridDimensions(cols, rows);
+        }
+        this.syncBuffers();
+        this.reset();
     },
 
     refreshLayerKeys: function() {
@@ -117,14 +281,12 @@ var WorldState = {
     },
 
     /**
-     * Compute power dengan resolver-based modifiers.
-     * Cache key = facId * TOTAL + idx (prevents cross-faction poisoning).
+     * Compute power with zero-allocation modifier resolution and O(1) TypedArray caching.
      */
     calcPower: function(facId, idx, isDefending, out) {
         var TOTAL = CONFIG.GRID.TOTAL;
         var cacheKey = facId * TOTAL + idx;
 
-        // Cache hit
         var cacheTick = isDefending ? this._powerCacheTickDef : this._powerCacheTickAtk;
         if (cacheTick[cacheKey] === this._powerTick) {
             if (!out) out = isDefending ? this._bufDef : this._bufAtk;
@@ -138,7 +300,6 @@ var WorldState = {
             return out;
         }
 
-        // Guard: faction undefined
         var fac = this.factions[facId];
         if (!fac) {
             if (!out) out = isDefending ? this._bufDef : this._bufAtk;
@@ -149,7 +310,7 @@ var WorldState = {
 
         var stats = fac.baseStats;
 
-        // 1. Base formula (precomputed atau fallback)
+        // 1. Base formula (precomputed on faction)
         var pow = fac._basePower;
         if (pow === undefined) {
             var formula = fac.powerFormula || CONFIG.POWER.BASE_FORMULA;
@@ -157,6 +318,7 @@ var WorldState = {
                 + stats.res * formula.resWeight
                 + stats.spr * formula.sprWeight
                 + (stats.att + stats.res) * (formula.balancedBonus || 0);
+            fac._basePower = pow;
         }
 
         // 2. Hook onPowerCalc
@@ -165,20 +327,20 @@ var WorldState = {
             pow = compiled.onPowerCalc(this, idx, pow, fac);
         }
 
-        // 3. Power modifiers (resolver)
+        // 3. Power modifiers (zero-allocation shared context)
         var mods = fac.powerModifiers;
         if (mods && mods.length > 0) {
             var registry = CONFIG.POWER.MODIFIERS;
-            var ctx = {
-                ws: this, idx: idx, fac: fac,
-                isDefending: isDefending, modifier: null
-            };
+            _modCtx.ws = this;
+            _modCtx.idx = idx;
+            _modCtx.fac = fac;
+            _modCtx.isDefending = isDefending;
             for (var m = 0; m < mods.length; m++) {
                 var mod = mods[m];
                 var resolver = registry[mod.type];
                 if (resolver) {
-                    ctx.modifier = mod;
-                    pow *= resolver(ctx);
+                    _modCtx.modifier = mod;
+                    pow *= resolver(_modCtx);
                 }
             }
         }
@@ -188,7 +350,7 @@ var WorldState = {
             pow = compiled.onDefendCalc(this, idx, pow, fac);
         }
 
-        // 5. RNG variance (dengan stuck boost)
+        // 5. RNG variance (with stuck boost)
         var maxStat = fac._maxStat !== undefined
             ? fac._maxStat
             : Math.max(stats.spr, stats.res, stats.att);
@@ -202,50 +364,34 @@ var WorldState = {
             isCrit = true;
         }
 
-        // Store cache
+        var fpow = Math.fround(pow);
         if (isDefending) {
-            this._powerCacheDef[cacheKey] = pow;
+            this._powerCacheDef[cacheKey] = fpow;
             this._powerCacheTickDef[cacheKey] = this._powerTick;
         } else {
-            this._powerCacheAtk[cacheKey] = pow;
+            this._powerCacheAtk[cacheKey] = fpow;
             this._powerCacheCritAtk[cacheKey] = isCrit ? 1 : 0;
             this._powerCacheTickAtk[cacheKey] = this._powerTick;
         }
 
         if (!out) out = isDefending ? this._bufDef : this._bufAtk;
-        out.power = pow;
+        out.power = fpow;
         out.isCrit = isCrit;
         return out;
     },
 
     isUniformFromCounts: function(cellCounts) {
-        for (var i = 0; i < FACTION_COUNT; i++) {
+        var fCount = Math.min(cellCounts.length, FACTIONS.length);
+        for (var i = 0; i < fCount; i++) {
             if (cellCounts[i] === CONFIG.GRID.TOTAL) return i;
         }
         return -1;
     },
 
-    // ========================================================================
-    // STUCK MONITOR — Speed-aware, zero-cost saat speed rendah
-    // ========================================================================
-
-    /**
-     * Update stuck monitor.
-     * 
-     * FAST PATH: speed < ENABLE_AT_SPEED → ~3 ops → return 0
-     * SLOW PATH: ~15 ops → score-based level detection
-     * 
-     * @param {number} cellsChanged - Dari Engine commit loop
-     * @param {number} speedLevel   - Speed multiplier
-     * @param {number} dominantFaction - Dari Engine centroid loop
-     * @param {number} currentTick  - Tick counter
-     * @returns {number} Stuck level (0-3)
-     */
     updateStuckMonitor: function(cellsChanged, speedLevel, dominantFaction, currentTick) {
         var cfg = CONFIG.STUCK_RESOLVER;
         var s = this._stuck;
 
-        // ===== FAST PATH =====
         if (speedLevel < cfg.ENABLE_AT_SPEED) {
             if (s.lastSpeedLevel >= cfg.ENABLE_AT_SPEED) {
                 s.counter = 0;
@@ -261,7 +407,6 @@ var WorldState = {
 
         s.lastSpeedLevel = speedLevel;
 
-        // ===== SLOW PATH =====
         if (cellsChanged >= cfg.CHANGE_THRESHOLD) {
             s.counter = 0;
             s.dominanceAge = 0;
@@ -277,7 +422,6 @@ var WorldState = {
             s.dominanceAge = 0;
         }
 
-        // ===== SCORE =====
         var score = 0;
         if (speedLevel >= cfg.SOFT_AT_SPEED)     score += 1;
         if (speedLevel >= cfg.ACTIVE_AT_SPEED)   score += 1;
@@ -293,7 +437,6 @@ var WorldState = {
         else if (score >= cfg.SCORE_TO_LEVEL_MODERATE) level = 2;
         else if (score >= cfg.SCORE_TO_LEVEL_MILD)     level = 1;
 
-        // Log on state change (throttled)
         if (level !== s.level && cfg.LOG_LEVEL !== 'off' &&
             currentTick - s.lastLogTick > cfg.LOG_THROTTLE_TICKS) {
             console.log('[STUCK] level=' + level +
@@ -308,80 +451,61 @@ var WorldState = {
         return level;
     },
 
-    /**
-     * Apply stuck resolver berdasarkan level.
-     * Idempotent — aman dipanggil berkali-kali.
-     * 
-     * FIX v6:
-     *   - Level 2: guard capturedThisTick (cegah overwrite)
-     *   - Level 3: mark capturedThisTick di force convert
-     */
     applyStuckResolver: function(level, cellCounts, currentTick) {
         if (level <= 0) return;
 
         var cfg = CONFIG.STUCK_RESOLVER;
         var s = this._stuck;
 
-        // Skip kalau masih dalam masa nudge sebelumnya
         if (currentTick < s.nudgeEndTick) return;
 
         if (level === 1) {
-            // MILD: boost decay + RNG variance
             s.decayBoost = cfg.MILD_DECAY_BOOST;
             s.rngVarianceBoost = cfg.MILD_RNG_VARIANCE_BOOST;
             s.nudgeEndTick = currentTick + cfg.MILD_DURATION_TICKS;
             s.currentNudge = 'mild';
-
-            if (cfg.LOG_LEVEL === 'verbose') {
-                console.log('[RESOLVER] Mild applied (decay=' + s.decayBoost + 'x)');
-            }
         } else if (level === 2) {
-            // MODERATE: force decay layer tinggi + random capture
             var threshold = cfg.MODERATE_FORCE_DECAY_THRESHOLD;
             var factor = cfg.MODERATE_FORCE_DECAY_FACTOR;
             var keys = this._layerKeys;
             for (var k = 0; k < keys.length; k++) {
-                var arr = this.layers[keys[k]];
+                var lKey = keys[k];
+                if (!this.layerHasActiveCells[lKey]) continue;
+                var arr = this.layers[lKey];
                 if (!arr) continue;
-                for (var i = 0; i < arr.length; i++) {
-                    if (arr[i] > threshold) {
-                        arr[i] = Math.floor(arr[i] * factor);
+                var actList = this.layerActiveList[lKey];
+                var actCount = this.layerActiveCount[lKey] | 0;
+                for (var i = 0; i < actCount; i++) {
+                    var idx = actList[i];
+                    if (arr[idx] > threshold) {
+                        arr[idx] = (arr[idx] * factor) | 0;
                     }
                 }
             }
 
-            // Random capture ke dominant
             var dom = s.dominantFaction;
-            if (dom !== -1 && dom < FACTION_COUNT) {
+            if (dom !== -1 && dom < FACTIONS.length) {
                 var chance = cfg.MODERATE_RANDOM_CAPTURE_CHANCE;
-                var captured = 0;
                 for (var c = 0; c < CONFIG.GRID.TOTAL; c++) {
                     var owner = this.grid[c];
                     if (owner === -1 || owner === dom) continue;
-                    // FIX v6: guard capturedThisTick
                     if (this.capturedThisTick[c]) continue;
                     if (Utils.fastRNG() >= chance) continue;
 
                     this.nextGrid[c] = dom;
-                    this.capturedThisTick[c] = 1;   // ← mark
+                    this.capturedThisTick[c] = 1;
                     this.changes++;
-                    captured++;
-                }
-                if (captured > 0 && cfg.LOG_LEVEL !== 'off') {
-                    console.log('[RESOLVER] Moderate: force-captured ' + captured + ' cells');
                 }
             }
 
             s.nudgeEndTick = currentTick + cfg.MODERATE_DURATION_TICKS;
             s.currentNudge = 'moderate';
         } else if (level >= 3) {
-            // SEVERE: force convert semua cell ke dominant
             if (cfg.SEVERE_FORCE_CONVERT) {
                 var domSev = s.dominantFaction;
-                if (domSev === -1 || domSev >= FACTION_COUNT) {
-                    // Fallback: cari dominant dari cellCounts
+                if (domSev === -1 || domSev >= FACTIONS.length) {
                     var maxCount = 0;
-                    for (var f = 0; f < FACTION_COUNT; f++) {
+                    for (var f = 0; f < FACTIONS.length; f++) {
                         if (cellCounts[f] > maxCount) {
                             maxCount = cellCounts[f];
                             domSev = f;
@@ -390,24 +514,19 @@ var WorldState = {
                 }
 
                 if (domSev !== -1) {
-                    // FIX v6: mark capturedThisTick di force convert
                     for (var cc = 0; cc < CONFIG.GRID.TOTAL; cc++) {
                         this.nextGrid[cc] = domSev;
                         this.capturedThisTick[cc] = 1;
                     }
                     for (var kk = 0; kk < this._layerKeys.length; kk++) {
-                        this.layers[this._layerKeys[kk]].fill(0);
-                    }
-
-                    if (cfg.LOG_LEVEL !== 'off') {
-                        console.log('[RESOLVER] Severe: force victory to faction ' + domSev);
+                        this.clearLayer(this._layerKeys[kk]);
                     }
 
                     if (cfg.SEVERE_TRIGGER_LAST_ONE) {
                         var winnerFac = this.factions[domSev];
                         if (winnerFac && winnerFac.icon) {
-                            var cx = (CONFIG.GRID.COLS / 2) * CONFIG.GRID.SIZE;
-                            var cy = (CONFIG.GRID.ROWS / 2) * CONFIG.GRID.SIZE;
+                            var cx = CONFIG.LAYOUT.CANVAS_SIZE * 0.5;
+                            var cy = CONFIG.LAYOUT.CANVAS_SIZE * 0.5;
                             VFX.spawnShockwave(cx, cy, winnerFac.icon.color, 300, 12, 6);
                             VFX.spawn(cx, cy, winnerFac.icon.color, 30, 'normal');
                             VFX.spawn(cx, cy - 20, CONFIG.VFX.COLORS.TEXT_LAST, 1, 'textCrit', 'FORCED END');
@@ -421,24 +540,20 @@ var WorldState = {
         }
     },
 
-    /**
-     * Get decay boost multiplier (dipakai di Engine decay loop).
-     */
     getDecayBoost: function() {
         return this._stuck.decayBoost;
     },
 
-    // ========================================================================
-    // RESET
-    // ========================================================================
-
     reset: function() {
+        if (this.grid.length !== CONFIG.GRID.TOTAL || this.lastCounts.length < FACTIONS.length) {
+            this.syncBuffers();
+        }
         this.grid.fill(-1);
         this.nextGrid.fill(-1);
         this.capturedThisTick.fill(0);
 
         for (var i = 0; i < this._layerKeys.length; i++) {
-            this.layers[this._layerKeys[i]].fill(0);
+            this.clearLayer(this._layerKeys[i]);
         }
 
         this.winPending = false;
@@ -460,7 +575,6 @@ var WorldState = {
         this._powerCacheTickAtk.fill(-1);
         this._powerCacheTickDef.fill(-1);
 
-        // Reset stuck monitor
         var s = this._stuck;
         s.counter = 0;
         s.dominantFaction = -1;
@@ -477,4 +591,6 @@ var WorldState = {
     }
 };
 
-if (typeof window !== 'undefined') window.WorldState = WorldState;
+if (typeof window !== 'undefined') {
+    window.WorldState = WorldState;
+}

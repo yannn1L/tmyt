@@ -1,11 +1,27 @@
 /**
  * VFX — Pooled particles, shockwaves, lasers.
- * Optimized: text style caching, free-list O(1).
+ * Optimized: active-index ring buffers (zero idle pool iteration), text style caching, and Node-safe headless fallback.
  */
-'use strict';
 
-// Text style cache (avoid Pixi re-render on style mutation)
-var _textStyleCache = {};
+import { CONFIG, Utils } from './config.js';
+
+var _textStyleCache = Object.create(null);
+var _hexColorCache = Object.create(null);
+
+function _stringToHex(colorStr) {
+    if (typeof colorStr === 'number') return colorStr;
+    var cached = _hexColorCache[colorStr];
+    if (cached !== undefined) return cached;
+    var hex = 0xffffff;
+    if (typeof PIXI !== 'undefined' && PIXI.utils && PIXI.utils.string2hex) {
+        hex = PIXI.utils.string2hex(colorStr);
+    } else if (typeof colorStr === 'string' && colorStr.charCodeAt(0) === 35) {
+        hex = parseInt(colorStr.slice(1), 16) || 0xffffff;
+    }
+    _hexColorCache[colorStr] = hex;
+    return hex;
+}
+
 function _getTextStyle(colorHex, isCrit) {
     var key = colorHex + (isCrit ? '_c' : '_n');
     if (!_textStyleCache[key]) {
@@ -20,7 +36,7 @@ function _getTextStyle(colorHex, isCrit) {
     return _textStyleCache[key];
 }
 
-var PixiParticle = function(vfxContainer) {
+export var PixiParticle = function(vfxContainer) {
     this.active = false;
     this._poolIdx = -1;
 
@@ -44,7 +60,7 @@ PixiParticle.prototype.spawn = function(x, y, colorStr, type, text) {
     if (type === undefined) type = 'normal';
     if (text === undefined) text = '';
 
-    var colorHex = PIXI.utils.string2hex(colorStr);
+    var colorHex = _stringToHex(colorStr);
     this.colorHex = colorHex;
     this.type = type;
     this.sprite.visible = false;
@@ -77,8 +93,8 @@ PixiParticle.prototype.spawn = function(x, y, colorStr, type, text) {
         this.vx = 0;
         this.vy = pCfg.vy;
         this.sprite.tint = colorHex;
-        this.sprite.width = CONFIG.GRID.SIZE;
-        this.sprite.height = CONFIG.GRID.SIZE;
+        this.sprite.width = CONFIG.GRID.CELL_W || CONFIG.GRID.SIZE;
+        this.sprite.height = CONFIG.GRID.CELL_H || CONFIG.GRID.SIZE;
         this.sprite.visible = true;
         this.groundY = y;
     } else {
@@ -103,7 +119,7 @@ PixiParticle.prototype.spawn = function(x, y, colorStr, type, text) {
 };
 
 PixiParticle.prototype.update = function() {
-    if (!this.active) return;
+    if (!this.active) return false;
 
     if (this.type === 'fall') {
         var pCfgF = CONFIG.VFX.PHYSICS.fall;
@@ -118,8 +134,12 @@ PixiParticle.prototype.update = function() {
         this.sprite.x = this.x;
         this.sprite.y = this.y;
         this.sprite.alpha = this.life;
-        if (this.life <= 0) { this.active = false; this.sprite.visible = false; VFX._release(this); }
-        return;
+        if (this.life <= 0) {
+            this.active = false;
+            this.sprite.visible = false;
+            return false;
+        }
+        return true;
     }
 
     this.x += this.vx;
@@ -136,8 +156,7 @@ PixiParticle.prototype.update = function() {
         this.active = false;
         this.sprite.visible = false;
         this.textObj.visible = false;
-        VFX._release(this);
-        return;
+        return false;
     }
 
     if (this.type === 'text' || this.type === 'textCrit') {
@@ -161,9 +180,10 @@ PixiParticle.prototype.update = function() {
         this.sprite.width = size;
         this.sprite.height = size;
     }
+    return true;
 };
 
-var PixiShockwave = function(vfxContainer) {
+export var PixiShockwave = function(vfxContainer) {
     this.active = false;
     this._poolIdx = -1;
     this.graphics = new PIXI.Graphics();
@@ -180,7 +200,7 @@ var PixiShockwave = function(vfxContainer) {
 PixiShockwave.prototype.spawn = function(x, y, colorStr, maxRadius, speed, width, startRadius) {
     if (startRadius === undefined) startRadius = 1;
     this.x = x; this.y = y;
-    this.colorHex = PIXI.utils.string2hex(colorStr);
+    this.colorHex = _stringToHex(colorStr);
     this.maxRadius = maxRadius;
     this.speed = speed;
     this.width = width;
@@ -190,18 +210,23 @@ PixiShockwave.prototype.spawn = function(x, y, colorStr, maxRadius, speed, width
 };
 
 PixiShockwave.prototype.update = function() {
-    if (!this.active) return;
+    if (!this.active) return false;
     this.currentRadius += this.speed;
-    if (this.speed > 0 && this.currentRadius > this.maxRadius) { this.active = false; this.graphics.visible = false; return; }
-    if (this.speed < 0 && this.currentRadius < 1) { this.active = false; this.graphics.visible = false; return; }
+    if ((this.speed > 0 && this.currentRadius > this.maxRadius) ||
+        (this.speed < 0 && this.currentRadius < 1)) {
+        this.active = false;
+        this.graphics.visible = false;
+        return false;
+    }
 
     var alpha = this.speed > 0 ? 1.0 - (this.currentRadius / this.maxRadius) : (this.currentRadius / this.maxRadius);
     this.graphics.clear();
     this.graphics.lineStyle(this.width, this.colorHex, alpha);
     this.graphics.drawCircle(this.x, this.y, this.currentRadius);
+    return true;
 };
 
-var PixiLaser = function(vfxContainer) {
+export var PixiLaser = function(vfxContainer) {
     this.active = false;
     this._poolIdx = -1;
     this.graphics = new PIXI.Graphics();
@@ -218,7 +243,7 @@ var PixiLaser = function(vfxContainer) {
 PixiLaser.prototype.spawn = function(sx, sy, ex, ey, colorStr, width, duration, zigzag) {
     if (zigzag === undefined) zigzag = false;
     this.sx = sx; this.sy = sy; this.ex = ex; this.ey = ey;
-    this.colorHex = PIXI.utils.string2hex(colorStr);
+    this.colorHex = _stringToHex(colorStr);
     this.width = width;
     this.duration = duration;
     this.maxDuration = duration;
@@ -228,9 +253,13 @@ PixiLaser.prototype.spawn = function(sx, sy, ex, ey, colorStr, width, duration, 
 };
 
 PixiLaser.prototype.update = function() {
-    if (!this.active) return;
+    if (!this.active) return false;
     this.duration--;
-    if (this.duration <= 0) { this.active = false; this.graphics.visible = false; return; }
+    if (this.duration <= 0) {
+        this.active = false;
+        this.graphics.visible = false;
+        return false;
+    }
 
     var alpha = this.duration / this.maxDuration;
     this.graphics.clear();
@@ -249,9 +278,10 @@ PixiLaser.prototype.update = function() {
         this.graphics.moveTo(this.sx, this.sy);
         this.graphics.lineTo(this.ex, this.ey);
     }
+    return true;
 };
 
-var VFX = {
+export const VFX = {
     pool: [],
     shockwavePool: [],
     laserPool: [],
@@ -260,12 +290,25 @@ var VFX = {
     _swFreeList: [],
     _lsFreeList: [],
 
-    _activeTextIdx: [],
+    // Active-set TypedArrays to avoid iterating 400 idle slots every frame
+    _activeParticles: new Uint16Array(CONFIG.VFX.POOL_SIZE),
+    _activeParticleCount: 0,
+    _activeShockwaves: new Uint16Array(CONFIG.VFX.SHOCKWAVE_POOL),
+    _activeShockwaveCount: 0,
+    _activeLasers: new Uint16Array(CONFIG.VFX.LASER_POOL),
+    _activeLaserCount: 0,
+
+    _activeTextIdx: new Uint16Array(CONFIG.VFX.MAX_TEXT_POPUPS * 2),
     _activeTextCount: 0,
 
     init: function(appStage) {
+        if (typeof PIXI === 'undefined' || !appStage) return;
         this.vfxContainer = new PIXI.Container();
         appStage.addChild(this.vfxContainer);
+
+        this.pool.length = 0;
+        this.shockwavePool.length = 0;
+        this.laserPool.length = 0;
 
         for (var i = 0; i < CONFIG.VFX.POOL_SIZE; i++) {
             var p = new PixiParticle(this.vfxContainer);
@@ -293,12 +336,11 @@ var VFX = {
         for (var j = this.shockwavePool.length - 1; j >= 0; j--) this._swFreeList.push(j);
         this._lsFreeList.length = 0;
         for (var k = this.laserPool.length - 1; k >= 0; k--) this._lsFreeList.push(k);
-        this._activeTextIdx.length = 0;
-        this._activeTextCount = 0;
-    },
 
-    _release: function(particle) {
-        if (particle._poolIdx >= 0) this._freeList.push(particle._poolIdx);
+        this._activeParticleCount = 0;
+        this._activeShockwaveCount = 0;
+        this._activeLaserCount = 0;
+        this._activeTextCount = 0;
     },
 
     spawn: function(x, y, color, amount, type, text) {
@@ -307,10 +349,11 @@ var VFX = {
         if (type === undefined) type = 'normal';
         if (text === undefined) text = '';
 
-        if (type === 'text' || type === 'textCrit') {
+        var isText = (type === 'text' || type === 'textCrit');
+        if (isText) {
             if (this._activeTextCount >= CONFIG.VFX.MAX_TEXT_POPUPS) {
                 var oldestIdx = -1, minLife = 2.0;
-                for (var t = 0; t < this._activeTextIdx.length; t++) {
+                for (var t = 0; t < this._activeTextCount; t++) {
                     var ti = this._activeTextIdx[t];
                     var tp = this.pool[ti];
                     if (tp.active && tp.life < minLife) { minLife = tp.life; oldestIdx = ti; }
@@ -321,72 +364,109 @@ var VFX = {
                 }
             }
             amount = 1;
+        } else if (type !== 'fall') {
+            // Reserve 24 slots for floating combat text & monolith drops
+            if (this._freeList.length <= 24) return;
+            var activeCount = this._activeParticleCount;
+            if (activeCount > 280) {
+                amount = 1;
+            } else if (activeCount > 180 && amount > 1) {
+                amount = Math.max(1, (amount * 0.5) | 0);
+            }
         }
 
         var spawned = 0;
         while (spawned < amount && this._freeList.length > 0) {
             var idx = this._freeList.pop();
             this.pool[idx].spawn(x, y, color, type, text);
-            if (type === 'text' || type === 'textCrit') {
-                this._activeTextIdx.push(idx);
-                this._activeTextCount++;
+            this._activeParticles[this._activeParticleCount++] = idx;
+            if (isText && this._activeTextCount < this._activeTextIdx.length) {
+                this._activeTextIdx[this._activeTextCount++] = idx;
             }
             spawned++;
         }
     },
 
     spawnShockwave: function(x, y, color, maxRadius, speed, width, startRadius) {
+        if (!this.vfxContainer || this._swFreeList.length === 0) return;
         if (maxRadius === undefined) maxRadius = 80;
         if (speed === undefined) speed = 4;
         if (width === undefined) width = 3;
         if (startRadius === undefined) startRadius = 1;
-        if (this._swFreeList.length === 0) return;
         var idx = this._swFreeList.pop();
         this.shockwavePool[idx].spawn(x, y, color, maxRadius, speed, width, startRadius);
+        this._activeShockwaves[this._activeShockwaveCount++] = idx;
     },
 
     spawnLaser: function(sx, sy, ex, ey, color, width, dur, zigzag) {
+        if (!this.vfxContainer || this._lsFreeList.length === 0) return;
         if (width === undefined) width = 2;
         if (dur === undefined) dur = 10;
         if (zigzag === undefined) zigzag = false;
-        if (this._lsFreeList.length === 0) return;
         var idx = this._lsFreeList.pop();
         this.laserPool[idx].spawn(sx, sy, ex, ey, color, width, dur, zigzag);
+        this._activeLasers[this._activeLaserCount++] = idx;
     },
 
     updateAndDraw: function() {
-        var textIdxDirty = false;
-        for (var i = 0; i < this.pool.length; i++) {
-            var p = this.pool[i];
-            var wasActive = p.active;
-            p.update();
-            if (wasActive && !p.active && (p.type === 'text' || p.type === 'textCrit')) {
-                textIdxDirty = true;
+        // 1. Update only active particles using swap-and-pop
+        var pCount = this._activeParticleCount;
+        var activeP = this._activeParticles;
+        var textDirty = false;
+        var i = 0;
+        while (i < pCount) {
+            var pIdx = activeP[i];
+            var p = this.pool[pIdx];
+            if (p.update()) {
+                i++;
+            } else {
+                if (p.type === 'text' || p.type === 'textCrit') textDirty = true;
+                this._freeList.push(pIdx);
+                activeP[i] = activeP[--pCount];
             }
         }
+        this._activeParticleCount = pCount;
 
-        if (textIdxDirty) {
-            var newList = [];
-            for (var t = 0; t < this._activeTextIdx.length; t++) {
+        if (textDirty) {
+            var writeT = 0;
+            for (var t = 0; t < this._activeTextCount; t++) {
                 var ti = this._activeTextIdx[t];
-                if (this.pool[ti].active) newList.push(ti);
+                if (this.pool[ti].active) {
+                    this._activeTextIdx[writeT++] = ti;
+                }
             }
-            this._activeTextIdx = newList;
-            this._activeTextCount = newList.length;
+            this._activeTextCount = writeT;
         }
 
-        for (var j = 0; j < this.shockwavePool.length; j++) {
-            var sw = this.shockwavePool[j];
-            var wasActive = sw.active;
-            sw.update();
-            if (wasActive && !sw.active && this._swFreeList.indexOf(j) === -1) this._swFreeList.push(j);
+        // 2. Update only active shockwaves
+        var swCount = this._activeShockwaveCount;
+        var activeSW = this._activeShockwaves;
+        var j = 0;
+        while (j < swCount) {
+            var swIdx = activeSW[j];
+            if (this.shockwavePool[swIdx].update()) {
+                j++;
+            } else {
+                this._swFreeList.push(swIdx);
+                activeSW[j] = activeSW[--swCount];
+            }
         }
-        for (var k = 0; k < this.laserPool.length; k++) {
-            var ls = this.laserPool[k];
-            var wasActiveL = ls.active;
-            ls.update();
-            if (wasActiveL && !ls.active && this._lsFreeList.indexOf(k) === -1) this._lsFreeList.push(k);
+        this._activeShockwaveCount = swCount;
+
+        // 3. Update only active lasers
+        var lsCount = this._activeLaserCount;
+        var activeLS = this._activeLasers;
+        var k = 0;
+        while (k < lsCount) {
+            var lsIdx = activeLS[k];
+            if (this.laserPool[lsIdx].update()) {
+                k++;
+            } else {
+                this._lsFreeList.push(lsIdx);
+                activeLS[k] = activeLS[--lsCount];
+            }
         }
+        this._activeLaserCount = lsCount;
     },
 
     reset: function() {

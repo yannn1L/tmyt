@@ -1,17 +1,16 @@
 /**
  * UI CONFIG — Layout, styling, CRT shader, background animation.
- * Pure data. Global-scope safe (var → auto window property).
+ * Pure data ES module with global window binding for compatibility.
  */
-'use strict';
 
-var UI_CONFIG = {
+export const UI_CONFIG = {
   LAYOUT: {
     SIM_SCALE: 2.4,
     CANVAS_SIZE: 320,
     GAME_CONTAINER_SIZE: 320,
     CSS_VAR_SIM_SCALE: '--sim-scale'
   },
-  
+
   CRT: {
     ENABLED: true,
     SCANLINE_INTENSITY: 0.05,
@@ -48,7 +47,7 @@ var UI_CONFIG = {
       '}'
     ].join('\n')
   },
-  
+
   BACKGROUND: {
     ENABLED: false,
     PARTICLE_COUNT: 40,
@@ -65,7 +64,7 @@ var UI_CONFIG = {
     PARTICLE_BOB_SPEED: 0.01,
     BOUNDS_PADDING: 50
   },
-  
+
   ANIMATION: {
     WINNER_HOLD_MS: 2500,
     WINNER_DELAY_MS: 500,
@@ -73,4 +72,6 @@ var UI_CONFIG = {
   }
 };
 
-if (typeof window !== 'undefined') window.UI_CONFIG = UI_CONFIG;
+if (typeof window !== 'undefined') {
+  window.UI_CONFIG = UI_CONFIG;
+}

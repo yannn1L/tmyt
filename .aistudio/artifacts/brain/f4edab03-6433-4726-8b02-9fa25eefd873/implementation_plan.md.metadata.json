@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for adding Dev Mode to the Editor Scene with custom faction code loading, real-time simulation debugging telemetry (FPS, particles, tick rate, active layers), and dynamic arena grid dimensions (cols/rows presets & sliders).",
+  "updatedAt": "2026-11-05T15:05:57.296223365Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

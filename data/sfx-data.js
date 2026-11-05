@@ -1,10 +1,9 @@
 /**
- * ============================================================================
  * SFX DATA — Pure sound definitions. No playback logic.
  * Edit baseFreq, type, dur, vol here to tune sounds.
- * ============================================================================
  */
-const SFX_DATA = {
+
+export const SFX_DATA = {
   START: { baseFreq: 150, type: 'sawtooth', dur: 0.6, vol: 0.10, slideUp: true },
   CRIT: { baseFreq: 800, type: 'square', dur: 0.1, vol: 0.08, slideDown: true },
   CLICK: { freq: 600, type: 'sine', dur: 0.05, vol: 0.10 },
@@ -31,9 +30,13 @@ const SFX_DATA = {
   WIN_2: { freq: 660, type: 'sine', dur: 0.40, vol: 0.10 }
 };
 
-// Composite SFX metadata (sequences & dynamic params)
-const SFX_COMPOSITE = {
+export const SFX_COMPOSITE = {
   SPEEDUP: { first: 'SPEEDUP_1', second: 'SPEEDUP_2', delayMs: 100, freqMult1: 50, freqMult2: 80 },
   LASTONE: { first: 'LAST_1', second: 'LAST_2', delayMs: 100, freq1: 600, freq2: 880 },
   WIN: { first: 'WIN_1', second: 'WIN_2', delayMs: 200, freq1: 440, freq2: 660 }
 };
+
+if (typeof window !== 'undefined') {
+  window.SFX_DATA = SFX_DATA;
+  window.SFX_COMPOSITE = SFX_COMPOSITE;
+}

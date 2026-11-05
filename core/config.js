@@ -1,10 +1,12 @@
 /**
- * CONFIG — Runtime config + Utils.
- * Optimized: bit tricks, flattened dirs, precomputed neighbor indices, SplitMix32 RNG.
+ * CONFIG — Runtime configuration, precomputed spatial TypedArray lookup tables, and SplitMix32 RNG Utils.
+ * Optimized: O(1) CELL_X/CELL_Y, NEIGHBOR_IDX, DIAG_NEIGHBOR_IDX, and JUMP2_NEIGHBOR_IDX tables.
  */
-'use strict';
 
-var CONFIG = {
+import { UI_CONFIG } from '../data/ui-config.js';
+import { SFX_DATA, SFX_COMPOSITE } from '../data/sfx-data.js';
+
+export const CONFIG = {
     LAYOUT: UI_CONFIG.LAYOUT,
     CRT: UI_CONFIG.CRT,
     BACKGROUND: UI_CONFIG.BACKGROUND,
@@ -26,90 +28,61 @@ var CONFIG = {
         START_FACTION_MIN: 2,
         PLACEMENT_MAX_ATTEMPTS: 1000
     },
-    
-    // ---- Stuck Resolver (speed-aware, zero-cost saat speed normal) ----
+
     STUCK_RESOLVER: {
-        // === Aktifasi ===
-        ENABLE_AT_SPEED: 32, // Monitor mulai aktif di speed ini
+        ENABLE_AT_SPEED: 32,
         SOFT_AT_SPEED: 32,
         ACTIVE_AT_SPEED: 64,
         URGENT_AT_SPEED: 128,
         CRITICAL_AT_SPEED: 256,
         MAX_SPEEDUP_LEVEL: 999999,
-        
-        // === Deteksi stagnasi ===
-        CHANGE_THRESHOLD: 3, // < 3 cells berubah/tick = suspicious
-        STAGNATION_MILD: 20, // 20 tick stagnant → score +1
-        STAGNATION_SEVERE: 60, // 60 tick stagnant → score +1
-        
-        // === Dominasi ===
-        DOMINANCE_MILD_AGE: 60, // Dominasi statis 60 tick → score +1
-        DOMINANCE_SEVERE_AGE: 150, // 150 tick → score +1
-        
-        // === Escalation ===
-        // Score mapping (0-8):
-        //   0     → level 0 (normal)
-        //   1-2   → level 1 (mild — log + small nudge)
-        //   3-4   → level 2 (moderate — force decay)
-        //   5+    → level 3 (severe — force end)
+
+        CHANGE_THRESHOLD: 3,
+        STAGNATION_MILD: 20,
+        STAGNATION_SEVERE: 60,
+
+        DOMINANCE_MILD_AGE: 60,
+        DOMINANCE_SEVERE_AGE: 150,
+
         SCORE_TO_LEVEL_MILD: 1,
         SCORE_TO_LEVEL_MODERATE: 3,
         SCORE_TO_LEVEL_SEVERE: 5,
-        
-        // === Intervensi mild (level 1) ===
-        MILD_DECAY_BOOST: 2.0, // Layer decay × 2
-        MILD_RNG_VARIANCE_BOOST: 2.0, // RNG variance × 2
+
+        MILD_DECAY_BOOST: 2.0,
+        MILD_RNG_VARIANCE_BOOST: 2.0,
         MILD_DURATION_TICKS: 20,
-        
-        // === Intervensi moderate (level 2) ===
-        MODERATE_FORCE_DECAY_THRESHOLD: 50, // Layer > 50 di-force decay
-        MODERATE_FORCE_DECAY_FACTOR: 0.3, // Sisakan 30%
-        MODERATE_RANDOM_CAPTURE_CHANCE: 0.02, // 2% chance capture ke dominan
+
+        MODERATE_FORCE_DECAY_THRESHOLD: 50,
+        MODERATE_FORCE_DECAY_FACTOR: 0.3,
+        MODERATE_RANDOM_CAPTURE_CHANCE: 0.02,
         MODERATE_DURATION_TICKS: 30,
-        
-        // === Intervensi severe (level 3) ===
-        SEVERE_FORCE_CONVERT: true, // Force semua cell ke dominan
-        SEVERE_TRIGGER_LAST_ONE: true, // Tampilkan "LAST ONE!"
-        
-        // === Logging ===
-        LOG_LEVEL: 'off', // 'off' | 'info' | 'verbose'
+
+        SEVERE_FORCE_CONVERT: true,
+        SEVERE_TRIGGER_LAST_ONE: true,
+
+        LOG_LEVEL: 'off',
         LOG_THROTTLE_TICKS: 30
     },
-    
-    // ---- Power calculation system (data-driven) ----
+
     POWER: {
-        // Formula base power (bisa di-override per faction)
         BASE_FORMULA: {
             attWeight: 1.0,
             resWeight: 1.0,
             sprWeight: 0.5
         },
-        
-        // RNG variance (dari maxStat)
         RNG_VARIANCE: 0.1,
-        
-        // Crit
         CRIT_CHANCE: 0.15,
         CRIT_MULTIPLIER: 1.5,
-        
-        // Default hazard multiplier (kalau faction tidak set)
         DEFAULT_HAZARD_MULT: 0.6,
-        
-        // Power modifier resolvers (registry)
+
         MODIFIERS: {
-            /**
-             * Hazard resolver.
-             * ctx = { ws, idx, fac, modifier, isDefending }
-             * modifier = { type: 'hazard', key: 'poison', multiplier: 0.6 }
-             */
             hazard: function(ctx) {
                 var layer = ctx.ws.layers[ctx.modifier.key];
                 if (!layer || layer[ctx.idx] <= 0) return 1.0;
                 return ctx.modifier.multiplier;
             }
         },
-        
-        // Auto-populated: daftar hazard keys (dari faction dengan isHazard: true)
+
         HAZARD_KEYS: []
     },
 
@@ -151,10 +124,10 @@ var CONFIG = {
         TEXT_ALPHA_MULT: 5,
         SPRITE_SIZE_MAX: 4
     },
-    
+
     RENDER: { USE_PARTICLE_CONTAINER: true },
     PROFILE: { ENABLED: false, SAMPLE_FRAMES: 60 },
-    
+
     AUDIO: SFX_DATA,
     SFX_COMPOSITE: SFX_COMPOSITE,
 
@@ -162,31 +135,37 @@ var CONFIG = {
     DIAG_DIRECTIONS: [[-1, -1], [1, -1], [-1, 1], [1, 1]],
     DIRS_2: [[0, -2], [2, 0], [0, 2], [-2, 0]],
 
-    // ---- Batch 2: Flattened directions (faster than array-of-array) ----
     DIR_X: new Int8Array([0, 1, 0, -1]),
     DIR_Y: new Int8Array([-1, 0, 1, 0]),
     DIAG_X: new Int8Array([-1, 1, -1, 1]),
     DIAG_Y: new Int8Array([-1, -1, 1, 1]),
+    JUMP2_X: new Int8Array([0, 2, 0, -2]),
+    JUMP2_Y: new Int8Array([-2, 0, 2, 0]),
 
-    // ---- Batch 4: Flattened square patterns ----
-    // Each pattern: [dx0,dy0, dx1,dy1, dx2,dy2, dx3,dy3]
     SQUARE_PATTERNS_FLAT: new Int8Array([
-        0, 0,  -1, 0,   0, -1,  -1, -1,   // pattern 0 (top-left)
-        0, 0,   1, 0,   0, -1,   1, -1,   // pattern 1 (top-right)
-        0, 0,  -1, 0,   0,  1,  -1,  1,   // pattern 2 (bottom-left)
-        0, 0,   1, 0,   0,  1,   1,  1    // pattern 3 (bottom-right)
+        0, 0,  -1, 0,   0, -1,  -1, -1,
+        0, 0,   1, 0,   0, -1,   1, -1,
+        0, 0,  -1, 0,   0,  1,  -1,  1,
+        0, 0,   1, 0,   0,  1,   1,  1
     ]),
 
     HAZARD_KEYS: ['inferno', 'ices', 'toxic', 'sickening'],
     BLOCKER_KEYS: ['nature', 'mecha', 'bastion', 'storm'],
 
-    // ---- Precomputed runtime registries (populated at boot) ----
+    // Precomputed spatial lookup tables (populated below)
+    CELL_X: null,            // Uint8Array [TOTAL]
+    CELL_Y: null,            // Uint8Array [TOTAL]
+    NEIGHBOR_IDX: null,      // Int16Array [TOTAL * 4]
+    DIAG_NEIGHBOR_IDX: null, // Int16Array [TOTAL * 4]
+    JUMP2_NEIGHBOR_IDX: null,// Int16Array [TOTAL * 4]
+
+    // Precomputed runtime registries (populated at boot / match start)
     ACTIVE_ABILITY_KEYS: [],
     ACTIVE_VFX_KEYS: [],
     ACTIVE_TILE_KEYS: [],
+    ACTIVE_HOOKS: {},
     DECAY_LAYERS: [],
-    NEIGHBOR_IDX: null,      // Int16Array [TOTAL * 4]
-    HAZARD_LAYERS: [],       // Array of Int16Array references
+    HAZARD_LAYERS: [],
 
     UI: {
         SCENE_LOADING: 'scene-loading',
@@ -200,53 +179,111 @@ var CONFIG = {
         LOADING_FILL: 'loading-fill',
         WINNER_OVERLAY: 'winner-overlay',
         WINNER_TEXT: 'winner-text',
-        SPEEDUP_OVERLAY: 'speedup-overlay'
+        SPEEDUP_OVERLAY: 'speedup-overlay',
+        DEBUG_OVERLAY: 'sim-debug-overlay'
+    },
+
+    DEV_MODE: {
+        enabled: false,
+        debugOverlay: false
     },
 
     FPS: {
         ENABLED: false,
-        SAMPLE_INTERVAL_MS: 1000,
-        LOG_TAG: '[FPS]'
-    }
+        SAMPLE_INTERVAL_MS: 500,
+        LOG_TAG: '[FPS]',
+        currentFps: 60.0,
+        frameMs: 16.7
+    },
+
+    setGridDimensions: null
 };
 
-CONFIG.GRID.COLS = CONFIG.LAYOUT.CANVAS_SIZE / CONFIG.GRID.SIZE;
-CONFIG.GRID.ROWS = CONFIG.LAYOUT.CANVAS_SIZE / CONFIG.GRID.SIZE;
-CONFIG.GRID.TOTAL = CONFIG.GRID.COLS * CONFIG.GRID.ROWS;
-CONFIG.GRID.HALF_SIZE = CONFIG.GRID.SIZE / 2;
+if (typeof document !== 'undefined' && document.documentElement && typeof window !== 'undefined') {
+    var vw = window.innerWidth || 1024;
+    var vh = window.innerHeight || 768;
+    var simScale = Math.max(0.85, Math.min((vw - 48) / 340, (vh - 48) / 510, CONFIG.LAYOUT.SIM_SCALE));
+    var editorScale = Math.max(0.95, Math.min((vw - 48) / 340, (vh - 48) / 340, 2.2));
+    document.documentElement.style.setProperty(CONFIG.LAYOUT.CSS_VAR_SIM_SCALE, simScale.toFixed(3));
+    document.documentElement.style.setProperty('--editor-scale', editorScale.toFixed(3));
+}
 
-document.documentElement.style.setProperty(CONFIG.LAYOUT.CSS_VAR_SIM_SCALE, CONFIG.LAYOUT.SIM_SCALE);
+/**
+ * Dynamically configures the arena grid columns & rows while keeping the simulation
+ * canvas fixed at CONFIG.LAYOUT.CANVAS_SIZE (320x320).
+ * Recomputes all O(1) spatial coordinate & neighbor TypedArray lookup tables.
+ */
+export function setGridDimensions(cols, rows) {
+    var c = Math.max(4, Math.min(64, (cols | 0) || 20));
+    var r = Math.max(4, Math.min(64, (rows | 0) || 20));
+    var canvasSize = CONFIG.LAYOUT.CANVAS_SIZE;
 
-// ---- Batch 2: Precompute neighbor indices ----
-(function precomputeNeighbors() {
+    var cellW = canvasSize / c;
+    var cellH = canvasSize / r;
+    var baseSize = Math.min(cellW, cellH);
+
+    CONFIG.GRID.COLS = c;
+    CONFIG.GRID.ROWS = r;
+    CONFIG.GRID.TOTAL = c * r;
+    CONFIG.GRID.CELL_W = cellW;
+    CONFIG.GRID.CELL_H = cellH;
+    CONFIG.GRID.HALF_W = cellW * 0.5;
+    CONFIG.GRID.HALF_H = cellH * 0.5;
+    CONFIG.GRID.PIXEL_SIZE = baseSize;
+    CONFIG.GRID.SIZE = 16;
+    CONFIG.GRID.HALF_SIZE = 8;
+
     var TOTAL = CONFIG.GRID.TOTAL;
     var DIR_X = CONFIG.DIR_X, DIR_Y = CONFIG.DIR_Y;
+    var DIAG_X = CONFIG.DIAG_X, DIAG_Y = CONFIG.DIAG_Y;
+    var JUMP2_X = CONFIG.JUMP2_X, JUMP2_Y = CONFIG.JUMP2_Y;
+
+    var cellX = new Uint8Array(TOTAL);
+    var cellY = new Uint8Array(TOTAL);
     var neigh = new Int16Array(TOTAL * 4).fill(-1);
-    var COLS = CONFIG.GRID.COLS, ROWS = CONFIG.GRID.ROWS;
+    var diagNeigh = new Int16Array(TOTAL * 4).fill(-1);
+    var jump2Neigh = new Int16Array(TOTAL * 4).fill(-1);
 
     for (var i = 0; i < TOTAL; i++) {
-        var cx = i % COLS;
-        var cy = (i / COLS) | 0;
+        var cx = i % c;
+        var cy = (i / c) | 0;
+        cellX[i] = cx;
+        cellY[i] = cy;
+
         var base = i * 4;
         for (var d = 0; d < 4; d++) {
             var nx = cx + DIR_X[d], ny = cy + DIR_Y[d];
-            if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) {
-                neigh[base + d] = ny * COLS + nx;
+            if (nx >= 0 && nx < c && ny >= 0 && ny < r) {
+                neigh[base + d] = ny * c + nx;
+            }
+            var dnx = cx + DIAG_X[d], dny = cy + DIAG_Y[d];
+            if (dnx >= 0 && dnx < c && dny >= 0 && dny < r) {
+                diagNeigh[base + d] = dny * c + dnx;
+            }
+            var jnx = cx + JUMP2_X[d], jny = cy + JUMP2_Y[d];
+            if (jnx >= 0 && jnx < c && jny >= 0 && jny < r) {
+                jump2Neigh[base + d] = jny * c + jnx;
             }
         }
     }
+
+    CONFIG.CELL_X = cellX;
+    CONFIG.CELL_Y = cellY;
     CONFIG.NEIGHBOR_IDX = neigh;
-})();
+    CONFIG.DIAG_NEIGHBOR_IDX = diagNeigh;
+    CONFIG.JUMP2_NEIGHBOR_IDX = jump2Neigh;
+    return CONFIG.GRID;
+}
+
+CONFIG.setGridDimensions = setGridDimensions;
+setGridDimensions(20, 20);
 
 /**
- * UTILS — Fast math, RNG, grid helpers.
- * Uses SplitMix32 (faster than LCG in modern JIT).
- * fastSin handles negative degrees.
+ * UTILS — Fast math, SplitMix32 RNG, O(1) grid helpers.
  */
-var Utils = {
+export const Utils = {
     seed: 1337,
 
-    // ---- Batch 5: SplitMix32 RNG (~15% faster in V8) ----
     fastRNG: function() {
         this.seed = (this.seed + 0x9e3779b9) | 0;
         var t = this.seed ^ (this.seed >>> 16);
@@ -258,13 +295,11 @@ var Utils = {
 
     sinTbl: null,
     initSinTable: function() {
-        // 512 entries (power of 2, allows bitmask, no modulo, no branch)
         this.sinTbl = new Float32Array(512);
         for (var i = 0; i < 512; i++) {
             this.sinTbl[i] = Math.sin((i * Math.PI) / 256);
         }
     },
-    // ---- Batch 1: fastSin with bitmask (handles negative, 512 lookup) ----
     fastSin: function(deg) {
         return this.sinTbl[(deg | 0) & 511];
     },
@@ -273,31 +308,30 @@ var Utils = {
     },
 
     getIndex: function(x, y) { return y * CONFIG.GRID.COLS + x; },
-    getX: function(idx) { return idx % CONFIG.GRID.COLS; },
-    getY: function(idx) { return (idx / CONFIG.GRID.COLS) | 0; },
+    getX: function(idx) { return CONFIG.CELL_X[idx]; },
+    getY: function(idx) { return CONFIG.CELL_Y[idx]; },
     isValid: function(x, y) {
         return x >= 0 && x < CONFIG.GRID.COLS && y >= 0 && y < CONFIG.GRID.ROWS;
     },
 
-    // ---- Batch 5: Fast random direction (index only, no array alloc) ----
     getRandomDirIdx: function() {
-        return (Utils.fastRNG() * 4) | 0;
+        return (this.fastRNG() * 4) | 0;
     },
     getRandomDir: function() {
-        return CONFIG.DIRECTIONS[Utils.getRandomDirIdx()];
+        return CONFIG.DIRECTIONS[(this.fastRNG() * 4) | 0];
     },
 
     shuffleArray: function(arr) {
         for (var i = arr.length - 1; i > 0; i--) {
-            var j = (Utils.fastRNG() * (i + 1)) | 0;
+            var j = (this.fastRNG() * (i + 1)) | 0;
             var temp = arr[i]; arr[i] = arr[j]; arr[j] = temp;
         }
     }
 };
 Utils.initSinTable();
 
-var DIRS = CONFIG.DIRECTIONS;
-var DIAG_DIRS = CONFIG.DIAG_DIRECTIONS;
+export const DIRS = CONFIG.DIRECTIONS;
+export const DIAG_DIRS = CONFIG.DIAG_DIRECTIONS;
 
 if (typeof window !== 'undefined') {
     window.CONFIG = CONFIG;

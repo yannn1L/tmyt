@@ -1,40 +1,66 @@
 /**
- * RENDERER — Pixi app, texture baking, per-frame render.
- * 
- * FIX v4:
- *   - freezeOverlay / unfreezeOverlay (cegah VFX hilang saat win)
- *   - Overlay skip render saat frozen
- *   - Robust null-safe reads untuk compiled hooks
+ * RENDERER — PixiJS stage, texture baking, dirty-queue tile updates, and active-bounce set rendering.
+ *
+ * Optimizations:
+ * 1. dirtyQueue (Uint16Array) + dirtyCells bitflag: only updates sprites whose tile or neighbor
+ *    changed instead of scanning all 400 cells every frame.
+ * 2. activeBounceList (Uint16Array) swap-and-pop set: only animates tiles currently bouncing,
+ *    eliminating a 400-cell loop on idle frames.
+ * 3. Direct FactionRegistry lookup for tile/VFX overlay rendering without indexOf scans.
  */
-'use strict';
 
-var Renderer = {
+import { CONFIG, Utils } from './config.js';
+import { FACTIONS, FACTION_COUNT } from '../data/factions.js';
+import { WorldState } from './worldstate.js';
+import { FactionRegistry } from './faction-registry.js';
+import { VFX } from './vfx.js';
+
+export const Renderer = {
     app: null,
     gridContainer: null,
     gridSprites: [],
     overlayGraphics: null,
     bakedTextures: {},
+    _bakedBaseSize: 16,
+    _baseScaleX: 1,
+    _baseScaleY: 1,
+    _centroidStyle: null,
     frameCount: 0,
     shakeTime: 0,
     isRendering: false,
     fullRedraw: true,
     crtFilter: null,
 
-    sumX: new Int32Array(FACTION_COUNT),
-    sumY: new Int32Array(FACTION_COUNT),
-    count: new Int32Array(FACTION_COUNT),
+    sumX: new Int32Array(FACTIONS.length),
+    sumY: new Int32Array(FACTIONS.length),
+    count: new Int32Array(FACTIONS.length),
     centroids: null,
+
+    // Dirty queue & active bounce set (TypedArrays)
     dirtyCells: new Uint8Array(CONFIG.GRID.TOTAL),
+    dirtyQueue: new Uint16Array(CONFIG.GRID.TOTAL),
+    dirtyCount: 0,
+
     animTimers: new Float32Array(CONFIG.GRID.TOTAL),
+    inBounceSet: new Uint8Array(CONFIG.GRID.TOTAL),
+    activeBounceList: new Uint16Array(CONFIG.GRID.TOTAL),
+    activeBounceCount: 0,
+
+    tileHookCells: new Uint16Array(CONFIG.GRID.TOTAL),
+    tileHookCellCount: 0,
 
     _overlayFrameSkip: 0,
     _overlayFrozen: false,
+    _overlayWasEmpty: true,
 
     init: function() {
-        this.centroids = new Array(FACTION_COUNT);
-        for (var i = 0; i < FACTION_COUNT; i++) {
+        var fCount = FACTIONS.length;
+        this.centroids = new Array(fCount);
+        for (var i = 0; i < fCount; i++) {
             this.centroids[i] = { x: 0, y: 0, active: false, emote: '', obj: null, _emoteSet: false };
         }
+
+        if (typeof PIXI === 'undefined' || typeof document === 'undefined') return;
 
         this.app = new PIXI.Application({
             width: CONFIG.LAYOUT.CANVAS_SIZE,
@@ -49,25 +75,24 @@ var Renderer = {
         PIXI.settings.GC_MODE = PIXI.GC_MODES.AUTO;
         PIXI.settings.GC_MAX_IDLE = 120;
 
-        document.getElementById(CONFIG.UI.PIXI_CONTAINER).appendChild(this.app.view);
+        var container = document.getElementById(CONFIG.UI.PIXI_CONTAINER);
+        if (container) container.appendChild(this.app.view);
 
         this.gridContainer = new PIXI.Container();
         this.app.stage.addChild(this.gridContainer);
 
-        var half = CONFIG.GRID.HALF_SIZE;
-        for (var s = 0; s < CONFIG.GRID.TOTAL; s++) {
-            var spr = new PIXI.Sprite(PIXI.Texture.EMPTY);
-            spr.anchor.set(0.5);
-            spr.x = Utils.getX(s) * CONFIG.GRID.SIZE + half;
-            spr.y = Utils.getY(s) * CONFIG.GRID.SIZE + half;
-            this.gridContainer.addChild(spr);
-            this.gridSprites[s] = spr;
-        }
+        this.rebuildGrid();
 
         this.overlayGraphics = new PIXI.Graphics();
+        var cellW = CONFIG.GRID.CELL_W || CONFIG.GRID.SIZE;
+        var cellH = CONFIG.GRID.CELL_H || CONFIG.GRID.SIZE;
+        this.overlayGraphics.scale.set(
+            cellW / CONFIG.GRID.SIZE,
+            cellH / CONFIG.GRID.SIZE
+        );
         this.app.stage.addChild(this.overlayGraphics);
 
-        var cStyle = new PIXI.TextStyle({
+        this._centroidStyle = new PIXI.TextStyle({
             fontFamily: 'sans-serif',
             fontSize: 22,
             fill: '#ffffff',
@@ -78,8 +103,8 @@ var Renderer = {
             dropShadowDistance: 2,
             dropShadowAngle: Math.PI / 2
         });
-        for (var t = 0; t < FACTION_COUNT; t++) {
-            var text = new PIXI.Text('', cStyle);
+        for (var t = 0; t < fCount; t++) {
+            var text = new PIXI.Text('', this._centroidStyle);
             text.anchor.set(0.5);
             text.visible = false;
             this.app.stage.addChild(text);
@@ -105,38 +130,214 @@ var Renderer = {
         this.app.ticker.maxFPS = 60;
     },
 
-    /**
-     * Freeze overlay — saat win, VFX overlay (mecha/bastion/nature)
-     * tidak di-clear, sehingga tetap terlihat.
-     */
+    rebuildGrid: function() {
+        var total = CONFIG.GRID.TOTAL;
+        if (this.dirtyCells.length !== total) {
+            this.dirtyCells = new Uint8Array(total);
+            this.dirtyQueue = new Uint16Array(total);
+            this.animTimers = new Float32Array(total);
+            this.inBounceSet = new Uint8Array(total);
+            this.activeBounceList = new Uint16Array(total);
+            this.tileHookCells = new Uint16Array(total);
+        }
+        this.dirtyCount = 0;
+        this.activeBounceCount = 0;
+        this.tileHookCellCount = 0;
+
+        var cellW = CONFIG.GRID.CELL_W || CONFIG.GRID.SIZE;
+        var cellH = CONFIG.GRID.CELL_H || CONFIG.GRID.SIZE;
+        this._baseScaleX = cellW / this._bakedBaseSize;
+        this._baseScaleY = cellH / this._bakedBaseSize;
+
+        if (!this.gridContainer || typeof PIXI === 'undefined') return;
+
+        // Remove surplus sprites if grid shrank
+        while (this.gridSprites.length > total) {
+            var oldSpr = this.gridSprites.pop();
+            if (oldSpr) {
+                this.gridContainer.removeChild(oldSpr);
+                oldSpr.destroy();
+            }
+        }
+
+        var cellX = CONFIG.CELL_X;
+        var cellY = CONFIG.CELL_Y;
+        var halfW = cellW * 0.5;
+        var halfH = cellH * 0.5;
+
+        for (var s = 0; s < total; s++) {
+            var spr = this.gridSprites[s];
+            if (!spr) {
+                spr = new PIXI.Sprite(PIXI.Texture.EMPTY);
+                spr.anchor.set(0.5);
+                this.gridContainer.addChild(spr);
+                this.gridSprites[s] = spr;
+            }
+            spr.texture = PIXI.Texture.EMPTY;
+            spr.x = cellX[s] * cellW + halfW;
+            spr.y = cellY[s] * cellH + halfH;
+            spr.scale.set(this._baseScaleX, this._baseScaleY);
+        }
+
+        if (this.overlayGraphics) {
+            this.overlayGraphics.scale.set(
+                cellW / CONFIG.GRID.SIZE,
+                cellH / CONFIG.GRID.SIZE
+            );
+        }
+    },
+
+    syncGridAndFactions: function() {
+        var fCount = FACTIONS.length;
+        if (this.sumX.length < fCount) {
+            this.sumX = new Int32Array(fCount);
+            this.sumY = new Int32Array(fCount);
+            this.count = new Int32Array(fCount);
+        }
+        if (!this.centroids) this.centroids = [];
+        while (this.centroids.length < fCount) {
+            var cObj = { x: 0, y: 0, active: false, emote: '', obj: null, _emoteSet: false };
+            if (this.app && this.app.stage && typeof PIXI !== 'undefined' && this._centroidStyle) {
+                var text = new PIXI.Text('', this._centroidStyle);
+                text.anchor.set(0.5);
+                text.visible = false;
+                this.app.stage.addChild(text);
+                cObj.obj = text;
+            }
+            this.centroids.push(cObj);
+        }
+
+        for (var i = 0; i < fCount; i++) {
+            var fac = FACTIONS[i];
+            if (typeof PIXI !== 'undefined' && typeof document !== 'undefined') {
+                this.bakeFactionTexture(fac);
+            }
+        }
+
+        this.rebuildGrid();
+    },
+
+    bakeFactionTexture: function(fac) {
+        if (typeof PIXI === 'undefined' || typeof document === 'undefined' || !fac) return;
+        if (!this._texturesByColor) this._texturesByColor = {};
+        var colorKey = (fac.icon && fac.icon.color) ? fac.icon.color : '#ffffff';
+        if (!this._texturesByColor[colorKey]) {
+            var bs = this._bakedBaseSize;
+            var q = bs / 4;
+            var texArr = new Array(16);
+            for (var mask = 0; mask < 16; mask++) {
+                var cvs = document.createElement('canvas');
+                cvs.width = bs;
+                cvs.height = bs;
+                var c = cvs.getContext('2d');
+                c.fillStyle = colorKey;
+                c.fillRect(q, q, q * 2, q * 2);
+                if (mask & 1) c.fillRect(q, 0, q * 2, q);
+                if (mask & 2) c.fillRect(q * 3, q, q, q * 2);
+                if (mask & 4) c.fillRect(q, q * 3, q * 2, q);
+                if (mask & 8) c.fillRect(0, q, q, q * 2);
+                texArr[mask] = PIXI.Texture.from(cvs);
+            }
+            this._texturesByColor[colorKey] = texArr;
+        }
+        this.bakedTextures[fac.id] = this._texturesByColor[colorKey];
+    },
+
+    setCRTEnabled: function(enabled) {
+        CONFIG.CRT.ENABLED = !!enabled;
+        if (!this.app || !this.app.stage) return;
+        if (CONFIG.CRT.ENABLED) {
+            if (!this.crtFilter && typeof PIXI !== 'undefined') {
+                var uniforms = {
+                    uTime: 0.0,
+                    uScanline: CONFIG.CRT.SCANLINE_INTENSITY,
+                    uVignette: CONFIG.CRT.VIGNETTE,
+                    uAberration: CONFIG.CRT.CHROMATIC_ABERRATION,
+                    uNoise: CONFIG.CRT.NOISE
+                };
+                this.crtFilter = new PIXI.Filter(null, CONFIG.CRT.FRAG_SHADER, uniforms);
+            }
+            if (this.crtFilter) this.app.stage.filters = [this.crtFilter];
+        } else {
+            this.app.stage.filters = [];
+        }
+    },
+
+    markDirty: function(idx) {
+        if (this.dirtyCells[idx] === 0) {
+            this.dirtyCells[idx] = 1;
+            this.dirtyQueue[this.dirtyCount++] = idx;
+        }
+    },
+
+    triggerBounce: function(idx) {
+        this.animTimers[idx] = CONFIG.VFX.BOUNCE.DURATION;
+        if (this.inBounceSet[idx] === 0) {
+            this.inBounceSet[idx] = 1;
+            this.activeBounceList[this.activeBounceCount++] = idx;
+        }
+    },
+
     freezeOverlay: function() {
         this._overlayFrozen = true;
     },
 
-    /**
-     * Unfreeze overlay — saat battle baru mulai.
-     */
     unfreezeOverlay: function() {
         this._overlayFrozen = false;
         this._overlayFrameSkip = 0;
     },
 
     reset: function() {
-        for (var i = 0; i < this.centroids.length; i++) {
-            var c = this.centroids[i];
-            c.active = false;
-            c._emoteSet = false;
-            if (c.obj) c.obj.visible = false;
+        if (this.dirtyCells.length !== CONFIG.GRID.TOTAL || this.sumX.length < FACTIONS.length) {
+            this.syncGridAndFactions();
+        } else {
+            var cellW = CONFIG.GRID.CELL_W || CONFIG.GRID.SIZE;
+            var cellH = CONFIG.GRID.CELL_H || CONFIG.GRID.SIZE;
+            this._baseScaleX = cellW / this._bakedBaseSize;
+            this._baseScaleY = cellH / this._bakedBaseSize;
+            if (this.overlayGraphics) {
+                this.overlayGraphics.scale.set(cellW / CONFIG.GRID.SIZE, cellH / CONFIG.GRID.SIZE);
+            }
+        }
+
+        if (this.centroids) {
+            for (var i = 0; i < this.centroids.length; i++) {
+                var c = this.centroids[i];
+                c.active = false;
+                c._emoteSet = false;
+                if (c.obj) c.obj.visible = false;
+            }
         }
         if (this.overlayGraphics) this.overlayGraphics.clear();
+        this._overlayWasEmpty = true;
         this.shakeTime = 0;
-        this.app.stage.x = 0;
-        this.app.stage.y = 0;
-        this.dirtyCells.fill(0);
-        this.animTimers.fill(0);
-        for (var j = 0; j < CONFIG.GRID.TOTAL; j++) {
-            if (WorldState.grid[j] !== -1) this.animTimers[j] = CONFIG.VFX.BOUNCE.DURATION;
+        if (this.app && this.app.stage) {
+            this.app.stage.x = 0;
+            this.app.stage.y = 0;
         }
+        this.dirtyCells.fill(0);
+        this.dirtyCount = 0;
+        this.animTimers.fill(0);
+        this.inBounceSet.fill(0);
+        this.activeBounceCount = 0;
+
+        var tileHooksById = FactionRegistry.activeTileHooksByFacId;
+        var hasTileHooks = CONFIG.ACTIVE_TILE_KEYS.length > 0 && tileHooksById;
+        var thWrite = 0;
+
+        for (var j = 0; j < CONFIG.GRID.TOTAL; j++) {
+            if (this.gridSprites[j]) {
+                this.gridSprites[j].scale.set(this._baseScaleX, this._baseScaleY);
+            }
+            var owner = WorldState.grid[j];
+            if (owner !== -1) {
+                this.triggerBounce(j);
+                if (hasTileHooks && tileHooksById[owner]) {
+                    this.tileHookCells[thWrite++] = j;
+                }
+            }
+        }
+        this.tileHookCellCount = thWrite;
         this.fullRedraw = true;
         this._overlayFrameSkip = 0;
         this._overlayFrozen = false;
@@ -144,132 +345,150 @@ var Renderer = {
     },
 
     bakeAssets: async function() {
-        for (var oldId in this.bakedTextures) {
-            if (this.bakedTextures.hasOwnProperty(oldId)) {
-                var oldArr = this.bakedTextures[oldId];
+        if (typeof PIXI === 'undefined' || typeof document === 'undefined') return;
+
+        for (var oldColor in this._texturesByColor) {
+            if (Object.prototype.hasOwnProperty.call(this._texturesByColor, oldColor)) {
+                var oldArr = this._texturesByColor[oldColor];
                 for (var om = 0; om < oldArr.length; om++) {
                     if (oldArr[om] && oldArr[om].destroy) oldArr[om].destroy(true);
                 }
             }
         }
+        this._texturesByColor = {};
         this.bakedTextures = {};
 
         var fillBar = document.getElementById(CONFIG.UI.LOADING_FILL);
-        var totalBakes = FACTION_COUNT * 16;
+        var fCount = FACTIONS.length;
+        var totalBakes = fCount * 16;
         var progress = 0;
-        var yieldEvery = CONFIG.ANIMATION.LOADING_YIELD_EVERY;
 
-        for (var fIdx = 0; fIdx < FACTION_COUNT; fIdx++) {
+        for (var fIdx = 0; fIdx < fCount; fIdx++) {
             var fac = FACTIONS[fIdx];
-            this.bakedTextures[fac.id] = [];
-            for (var mask = 0; mask < 16; mask++) {
-                var cvs = document.createElement('canvas');
-                cvs.width = CONFIG.GRID.SIZE;
-                cvs.height = CONFIG.GRID.SIZE;
-                var c = cvs.getContext('2d');
-                c.fillStyle = fac.icon.color;
-                var q = CONFIG.GRID.SIZE / 4;
-                c.fillRect(q, q, q * 2, q * 2);
-                if (mask & 1) c.fillRect(q, 0, q * 2, q);
-                if (mask & 2) c.fillRect(q * 3, q, q, q * 2);
-                if (mask & 4) c.fillRect(q, q * 3, q * 2, q);
-                if (mask & 8) c.fillRect(0, q, q, q * 2);
-
-                this.bakedTextures[fac.id][mask] = PIXI.Texture.from(cvs);
-                progress++;
-                fillBar.style.width = ((progress / totalBakes) * 100) + '%';
-                if (mask % yieldEvery === 0) await new Promise(function(r) { setTimeout(r, 0); });
-            }
+            this.bakeFactionTexture(fac);
+            progress += 16;
+            if (fillBar) fillBar.style.width = ((progress / totalBakes) * 100) + '%';
         }
     },
 
     updateTileTexture: function(idx) {
+        var spr = this.gridSprites[idx];
+        if (!spr) return;
         var owner = WorldState.grid[idx];
         if (owner === -1) {
-            this.gridSprites[idx].texture = PIXI.Texture.EMPTY;
+            spr.texture = PIXI.Texture.EMPTY;
             return;
         }
-        var x = Utils.getX(idx), y = Utils.getY(idx);
+        if (!this.bakedTextures[owner] && WorldState.factions[owner]) {
+            this.bakeFactionTexture(WorldState.factions[owner]);
+        }
+        var neigh = CONFIG.NEIGHBOR_IDX;
+        var base = idx * 4;
         var mask = 0;
-        if (y > 0 && WorldState.grid[idx - CONFIG.GRID.COLS] === owner) mask |= 1;
-        if (x < CONFIG.GRID.COLS - 1 && WorldState.grid[idx + 1] === owner) mask |= 2;
-        if (y < CONFIG.GRID.ROWS - 1 && WorldState.grid[idx + CONFIG.GRID.COLS] === owner) mask |= 4;
-        if (x > 0 && WorldState.grid[idx - 1] === owner) mask |= 8;
-        this.gridSprites[idx].texture = this.bakedTextures[owner][mask];
+        var n0 = neigh[base];
+        var n1 = neigh[base + 1];
+        var n2 = neigh[base + 2];
+        var n3 = neigh[base + 3];
+        if (n0 !== -1 && WorldState.grid[n0] === owner) mask |= 1;
+        if (n1 !== -1 && WorldState.grid[n1] === owner) mask |= 2;
+        if (n2 !== -1 && WorldState.grid[n2] === owner) mask |= 4;
+        if (n3 !== -1 && WorldState.grid[n3] === owner) mask |= 8;
+        spr.texture = this.bakedTextures[owner] ? this.bakedTextures[owner][mask] : PIXI.Texture.EMPTY;
     },
 
     render: function() {
-        if (!this.isRendering) return;
+        if (!this.isRendering || !this.app) return;
         this.frameCount++;
 
-        if (this.crtFilter) this.crtFilter.uniforms.uTime += CONFIG.CRT.TIME_INCREMENT;
+        if (this.crtFilter && CONFIG.CRT.ENABLED) this.crtFilter.uniforms.uTime += CONFIG.CRT.TIME_INCREMENT;
 
         var reqShake = WorldState.consumeShake();
         if (reqShake > this.shakeTime) this.shakeTime = reqShake;
 
-        if (this.shakeTime > 0) {
+        if (this.shakeTime > 0 && CONFIG.VFX.SHAKE_ENABLED !== false) {
             this.app.stage.x = Math.round((Utils.fastRNG() - 0.5) * this.shakeTime);
             this.app.stage.y = Math.round((Utils.fastRNG() - 0.5) * this.shakeTime);
             this.shakeTime--;
         } else {
-            this.app.stage.x = 0;
-            this.app.stage.y = 0;
+            this.shakeTime = 0;
+            if (this.app.stage.x !== 0 || this.app.stage.y !== 0) {
+                this.app.stage.x = 0;
+                this.app.stage.y = 0;
+            }
         }
 
-        // Tile texture updates
+        // 1. Dirty-queue tile texture updates
         if (this.fullRedraw) {
             for (var i = 0; i < CONFIG.GRID.TOTAL; i++) {
                 this.updateTileTexture(i);
                 this.gridSprites[i].tint = 0xFFFFFF;
+                this.dirtyCells[i] = 0;
             }
+            this.dirtyCount = 0;
             this.fullRedraw = false;
-        } else {
-            for (var k = 0; k < CONFIG.GRID.TOTAL; k++) {
-                if (this.dirtyCells[k]) {
-                    this.updateTileTexture(k);
-                    if (WorldState.grid[k] !== -1) this.animTimers[k] = CONFIG.VFX.BOUNCE.DURATION;
-                    this.dirtyCells[k] = 0;
+        } else if (this.dirtyCount > 0) {
+            var dQueue = this.dirtyQueue;
+            var dCount = this.dirtyCount;
+            for (var k = 0; k < dCount; k++) {
+                var cellIdx = dQueue[k];
+                this.dirtyCells[cellIdx] = 0;
+                this.updateTileTexture(cellIdx);
+                if (WorldState.grid[cellIdx] !== -1) {
+                    this.triggerBounce(cellIdx);
                 }
             }
+            this.dirtyCount = 0;
         }
 
-        // Bounce animation
-        var bnc = CONFIG.VFX.BOUNCE;
-        for (var b = 0; b < CONFIG.GRID.TOTAL; b++) {
-            if (this.animTimers[b] > 0) {
-                this.animTimers[b] -= bnc.DECAY;
-                if (this.animTimers[b] <= 0) {
-                    this.gridSprites[b].scale.set(1);
-                    this.animTimers[b] = 0;
+        // 2. Active bounce set update (swap-and-pop)
+        if (this.activeBounceCount > 0) {
+            var bnc = CONFIG.VFX.BOUNCE;
+            var bList = this.activeBounceList;
+            var bCount = this.activeBounceCount;
+            var baseSX = this._baseScaleX;
+            var baseSY = this._baseScaleY;
+            var bi = 0;
+            while (bi < bCount) {
+                var bIdx = bList[bi];
+                var t = this.animTimers[bIdx] - bnc.DECAY;
+                if (t <= 0) {
+                    this.animTimers[bIdx] = 0;
+                    this.inBounceSet[bIdx] = 0;
+                    this.gridSprites[bIdx].scale.set(baseSX, baseSY);
+                    bList[bi] = bList[--bCount];
                 } else {
-                    var p = 1.0 - this.animTimers[b];
+                    this.animTimers[bIdx] = t;
+                    var p = 1.0 - t;
                     var s = 1 + Math.sin(p * Math.PI * bnc.ELASTICITY) * bnc.MULTIPLIER * (1 - p);
-                    this.gridSprites[b].scale.set(s);
+                    this.gridSprites[bIdx].scale.set(baseSX * s, baseSY * s);
+                    bi++;
                 }
             }
+            this.activeBounceCount = bCount;
         }
 
-        // Overlay — FIX: skip update kalau frozen
+        // 3. Overlay rendering (throttled to 30fps or fullRedraw, skipped when frozen)
         if (!this._overlayFrozen) {
-            this._overlayFrameSkip = (this._overlayFrameSkip + 1) % 2;
-            if (this._overlayFrameSkip === 0 || this.fullRedraw) {
+            this._overlayFrameSkip = (this._overlayFrameSkip + 1) & 1;
+            if (this._overlayFrameSkip === 0) {
                 this._renderOverlay();
             }
         }
 
-        // Centroids (emote)
-        for (var ci = 0; ci < FACTION_COUNT; ci++) {
+        // 4. Centroids (floating faction emotes)
+        var floatY = Math.round(Utils.fastSin((this.frameCount * 8) & 511) * 3);
+        var fLen = this.centroids ? this.centroids.length : 0;
+        for (var ci = 0; ci < fLen; ci++) {
             var c = this.centroids[ci];
             if (c.active) {
                 if (!c._emoteSet) {
                     c.obj.text = c.emote;
                     c._emoteSet = true;
                 }
-                var floatY = Math.round(Utils.fastSin((this.frameCount * 8) % 512) * 3);
                 c.obj.x = c.x;
                 c.obj.y = c.y + floatY;
                 c.obj.visible = true;
-            } else {
+            } else if (c.obj && c.obj.visible) {
                 c.obj.visible = false;
             }
         }
@@ -278,53 +497,107 @@ var Renderer = {
     },
 
     _renderOverlay: function() {
-        this.overlayGraphics.clear();
-        var frame = this.frameCount;
-        var activeVfxKeys = CONFIG.ACTIVE_VFX_KEYS;
-        var activeTileKeys = CONFIG.ACTIVE_TILE_KEYS;
-        var hooksMap = CONFIG.ACTIVE_HOOKS;
+        var hasTileHooks = CONFIG.ACTIVE_TILE_KEYS.length > 0 && this.tileHookCellCount > 0;
+        var vfxEntries = FactionRegistry.activeVfxEntries;
+        var hasActiveVfx = false;
+        for (var vCheck = 0; vCheck < vfxEntries.length; vCheck++) {
+            var chk = vfxEntries[vCheck];
+            if (WorldState.layerHasActiveCells[chk.key]) {
+                hasActiveVfx = true;
+                break;
+            }
+            if (chk.extraLayers) {
+                for (var ec = 0; ec < chk.extraLayers.length; ec++) {
+                    if (WorldState.layerHasActiveCells[chk.extraLayers[ec]]) {
+                        hasActiveVfx = true;
+                        break;
+                    }
+                }
+                if (hasActiveVfx) break;
+            }
+        }
 
-        // Tile logic (per owned cell)
-        if (activeTileKeys.length > 0) {
-            for (var idx = 0; idx < CONFIG.GRID.TOTAL; idx++) {
+        if (!hasTileHooks && !hasActiveVfx) {
+            if (!this._overlayWasEmpty) {
+                this.overlayGraphics.clear();
+                this._overlayWasEmpty = true;
+            }
+            return;
+        }
+
+        this.overlayGraphics.clear();
+        this._overlayWasEmpty = false;
+
+        var frame = this.frameCount;
+        var cellX = CONFIG.CELL_X;
+        var cellY = CONFIG.CELL_Y;
+
+        // 1. Sparse Tile logic (iterates only cells owned by factions with onRenderTileLogic)
+        if (hasTileHooks) {
+            var tileHooksById = FactionRegistry.activeTileHooksByFacId;
+            var thCells = this.tileHookCells;
+            var thCount = this.tileHookCellCount;
+            for (var tIdx = 0; tIdx < thCount; tIdx++) {
+                var idx = thCells[tIdx];
                 var owner = WorldState.grid[idx];
                 if (owner === -1) continue;
-                var fac = WorldState.factions[owner];
-                var compiled = fac._compiled;
-                if (!compiled || !compiled.onRenderTileLogic) continue;
-                if (activeTileKeys.indexOf(fac.key) !== -1) {
-                    compiled.onRenderTileLogic(
+                var tileHook = tileHooksById[owner];
+                if (tileHook) {
+                    tileHook(
                         this.overlayGraphics,
-                        Utils.getX(idx), Utils.getY(idx), idx, 0, frame, fac
+                        cellX[idx], cellY[idx], idx, 0, frame, WorldState.factions[owner], WorldState
                     );
                 }
             }
         }
 
-        // Hazard VFX (per active faction)
-        for (var vk = 0; vk < activeVfxKeys.length; vk++) {
-            var vKey = activeVfxKeys[vk];
-            var facV = FACTIONS_BY_KEY[vKey];
-            var compiledV = hooksMap[vKey];
-            if (!compiledV || !compiledV.onRenderVFX) continue;
+        // 2. Sparse Hazard VFX (iterates only WorldState.layerActiveList instead of all TOTAL cells)
+        if (hasActiveVfx) {
+            for (var vk = 0; vk < vfxEntries.length; vk++) {
+                var entry = vfxEntries[vk];
+                var vKey = entry.key;
+                var mainActive = WorldState.layerHasActiveCells[vKey];
+                var extraLayers = entry.extraLayers;
+                var vfxHook = entry.hook;
+                var facV = entry.fac;
 
-            var hasExtra = facV.params && facV.params.extraLayers && facV.params.extraLayers.length > 0;
-            var mainLayer = WorldState.layers[vKey];
-            if (!mainLayer) continue;
-
-            for (var idx2 = 0; idx2 < CONFIG.GRID.TOTAL; idx2++) {
-                var isActive = mainLayer[idx2] > 0;
-                if (!isActive && hasExtra) {
-                    for (var el = 0; el < facV.params.extraLayers.length; el++) {
-                        var arr = WorldState.layers[facV.params.extraLayers[el]];
-                        if (arr && arr[idx2] > 0) { isActive = true; break; }
+                if (mainActive) {
+                    var actList = WorldState.layerActiveList[vKey];
+                    var actCount = WorldState.layerActiveCount[vKey] | 0;
+                    var mainLayer = WorldState.layers[vKey];
+                    if (actList && mainLayer) {
+                        for (var ai = 0; ai < actCount; ai++) {
+                            var idx2 = actList[ai];
+                            if (mainLayer[idx2] > 0) {
+                                vfxHook(
+                                    this.overlayGraphics,
+                                    cellX[idx2], cellY[idx2], idx2, frame, facV, WorldState
+                                );
+                            }
+                        }
                     }
                 }
-                if (isActive) {
-                    compiledV.onRenderVFX(
-                        this.overlayGraphics,
-                        Utils.getX(idx2), Utils.getY(idx2), idx2, frame, facV
-                    );
+
+                if (extraLayers) {
+                    var mainInSet = mainActive ? WorldState.layerInActiveSet[vKey] : null;
+                    for (var el = 0; el < extraLayers.length; el++) {
+                        var exKey = extraLayers[el];
+                        if (!WorldState.layerHasActiveCells[exKey]) continue;
+                        var exList = WorldState.layerActiveList[exKey];
+                        var exCount = WorldState.layerActiveCount[exKey] | 0;
+                        var exLayer = WorldState.layers[exKey];
+                        if (!exList || !exLayer) continue;
+                        for (var ei = 0; ei < exCount; ei++) {
+                            var idxEx = exList[ei];
+                            if (mainInSet && mainInSet[idxEx]) continue;
+                            if (exLayer[idxEx] > 0) {
+                                vfxHook(
+                                    this.overlayGraphics,
+                                    cellX[idxEx], cellY[idxEx], idxEx, frame, facV, WorldState
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -332,11 +605,9 @@ var Renderer = {
 };
 
 /**
- * ============================================================
  * RETRO BACKGROUND — Pre-rendered emoji + 30fps throttle
- * ============================================================
  */
-var RetroBackground = {
+export const RetroBackground = {
     canvas: null,
     ctx: null,
     rafId: 0,
@@ -351,14 +622,13 @@ var RetroBackground = {
     _resizeHandler: null,
 
     start: function() {
-        if (!CONFIG.BACKGROUND.ENABLED || this.running) return;
+        if (!CONFIG.BACKGROUND.ENABLED || this.running || typeof document === 'undefined') return;
         this.running = true;
         this._time = 0;
         this._lastDraw = 0;
 
         var cfg = CONFIG.BACKGROUND;
 
-        // Pre-render emoji
         var EMOJI_PRECISION = 128;
         for (var f = 0; f < FACTIONS.length; f++) {
             var em = FACTIONS[f].icon.unicode;
@@ -483,7 +753,7 @@ var RetroBackground = {
     }
 };
 
-var initRetroBackground = function() {
+export const initRetroBackground = function() {
     RetroBackground.start();
 };
 

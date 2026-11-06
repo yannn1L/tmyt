@@ -107,7 +107,8 @@ export const SettingsManager = {
         baseTickMs: 150,
         speedupIntervalMs: 10000,
         audioEnabled: true,
-        crtEnabled: true
+        crtEnabled: true,
+        shakeEnabled: true
     },
 
     current: {
@@ -116,7 +117,8 @@ export const SettingsManager = {
         baseTickMs: 150,
         speedupIntervalMs: 10000,
         audioEnabled: true,
-        crtEnabled: true
+        crtEnabled: true,
+        shakeEnabled: true
     },
 
     load: function() {
@@ -126,7 +128,8 @@ export const SettingsManager = {
             baseTickMs: this.defaults.baseTickMs,
             speedupIntervalMs: this.defaults.speedupIntervalMs,
             audioEnabled: this.defaults.audioEnabled,
-            crtEnabled: this.defaults.crtEnabled
+            crtEnabled: this.defaults.crtEnabled,
+            shakeEnabled: this.defaults.shakeEnabled
         };
         if (typeof localStorage === 'undefined') return this.current;
         try {
@@ -140,6 +143,11 @@ export const SettingsManager = {
                     if (typeof parsed.speedupIntervalMs === 'number') this.current.speedupIntervalMs = parsed.speedupIntervalMs;
                     if (typeof parsed.audioEnabled === 'boolean') this.current.audioEnabled = parsed.audioEnabled;
                     if (typeof parsed.crtEnabled === 'boolean') this.current.crtEnabled = parsed.crtEnabled;
+                    if (typeof parsed.shakeEnabled === 'boolean') {
+                        this.current.shakeEnabled = parsed.shakeEnabled;
+                    } else if (typeof parsed.crtEnabled === 'boolean') {
+                        this.current.shakeEnabled = parsed.crtEnabled;
+                    }
                 }
             }
         } catch (e) { /* silent */ }
@@ -162,7 +170,8 @@ export const SettingsManager = {
             baseTickMs: this.defaults.baseTickMs,
             speedupIntervalMs: this.defaults.speedupIntervalMs,
             audioEnabled: this.defaults.audioEnabled,
-            crtEnabled: this.defaults.crtEnabled
+            crtEnabled: this.defaults.crtEnabled,
+            shakeEnabled: this.defaults.shakeEnabled
         };
         this.save();
         return this.current;
@@ -172,7 +181,7 @@ export const SettingsManager = {
         CONFIG.SIMULATION.BASE_TICK_MS = this.current.baseTickMs;
         CONFIG.SIMULATION.SPEEDUP_INTERVAL_MS = this.current.speedupIntervalMs;
         AudioService.setMuted(!this.current.audioEnabled);
-        CONFIG.VFX.SHAKE_ENABLED = this.current.crtEnabled;
+        CONFIG.VFX.SHAKE_ENABLED = this.current.shakeEnabled;
         Renderer.setCRTEnabled(this.current.crtEnabled);
     }
 };
@@ -666,7 +675,17 @@ export const UI = {
                 SettingsManager.current.crtEnabled = !SettingsManager.current.crtEnabled;
                 SettingsManager.save();
                 UI.syncSettingsUI();
-                UI._setSettingsStatus('CRT & Shake ' + (SettingsManager.current.crtEnabled ? 'ON' : 'OFF') + ' & saved.');
+                UI._setSettingsStatus('CRT Filter ' + (SettingsManager.current.crtEnabled ? 'ON' : 'OFF') + ' & saved.');
+            };
+        }
+
+        var btnShake = document.getElementById('btn-setting-shake');
+        if (btnShake) {
+            btnShake.onclick = function() {
+                SettingsManager.current.shakeEnabled = !SettingsManager.current.shakeEnabled;
+                SettingsManager.save();
+                UI.syncSettingsUI();
+                UI._setSettingsStatus('Screen Shake ' + (SettingsManager.current.shakeEnabled ? 'ON' : 'OFF') + ' & saved.');
             };
         }
 
@@ -722,6 +741,13 @@ export const UI = {
             btnCrt.classList.toggle('active', !!cur.crtEnabled);
             btnCrt.setAttribute('aria-pressed', cur.crtEnabled ? 'true' : 'false');
             btnCrt.textContent = cur.crtEnabled ? 'ON' : 'OFF';
+        }
+
+        var btnShake = document.getElementById('btn-setting-shake');
+        if (btnShake) {
+            btnShake.classList.toggle('active', !!cur.shakeEnabled);
+            btnShake.setAttribute('aria-pressed', cur.shakeEnabled ? 'true' : 'false');
+            btnShake.textContent = cur.shakeEnabled ? 'ON' : 'OFF';
         }
     },
 

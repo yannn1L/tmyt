@@ -500,7 +500,8 @@ defineFaction({
 
 ### 2. Settings Tab
 - **Game Speed & Pacing**: Adjust Base Tick Speed (`20ms`–`500ms`) and Speedup Escalation Interval (`2.0s`–`30.0s`).
-- **CRT Shader & Visuals**: Toggle retro CRT scanlines, chromatic aberration, and animated floating background emojis.
+- **CRT Filter**: Toggle retro CRT scanline shader and chromatic aberration independently.
+- **Screen Shake**: Toggle impact, crit, and bomb detonation camera shake independently.
 - **Sound Effects**: Toggle procedural Web Audio synthesizer SFX.
 - **Persistence**: All settings persist to browser `localStorage` via `SettingsManager`.
 

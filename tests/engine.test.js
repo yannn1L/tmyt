@@ -265,14 +265,29 @@ test('Dynamic Arena cols/rows resizing and Dev Mode evaluateFactionCode work end
     assert.equal(FACTIONS_BY_KEY.solar, undefined);
     assert.equal(FACTIONS.length, 13);
 
-    // 5. Verify SettingsManager applies and resets settings cleanly
+    // 5. Verify SettingsManager applies and resets settings cleanly (including independent CRT & Shake)
     SettingsManager.current.baseTickMs = 75;
     SettingsManager.current.speedupIntervalMs = 5000;
+    SettingsManager.current.crtEnabled = false;
+    SettingsManager.current.shakeEnabled = true;
     SettingsManager.apply();
     assert.equal(CONFIG.SIMULATION.BASE_TICK_MS, 75);
     assert.equal(CONFIG.SIMULATION.SPEEDUP_INTERVAL_MS, 5000);
+    assert.equal(CONFIG.VFX.SHAKE_ENABLED, true);
+    assert.equal(CONFIG.CRT.ENABLED, false);
+
+    SettingsManager.current.crtEnabled = true;
+    SettingsManager.current.shakeEnabled = false;
+    SettingsManager.apply();
+    assert.equal(CONFIG.VFX.SHAKE_ENABLED, false);
+    assert.equal(CONFIG.CRT.ENABLED, true);
+
     SettingsManager.resetDefaults();
     assert.equal(CONFIG.SIMULATION.BASE_TICK_MS, 150);
+    assert.equal(CONFIG.VFX.SHAKE_ENABLED, true);
+    assert.equal(CONFIG.CRT.ENABLED, true);
+    assert.equal(SettingsManager.current.shakeEnabled, true);
+    assert.equal(SettingsManager.current.crtEnabled, true);
 
     // Restore default 20x20 grid for subsequent tests
     WorldState.resize(20, 20);

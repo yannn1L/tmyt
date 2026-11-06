@@ -96,6 +96,7 @@ export const CONFIG = {
         TEXT_FONT_SIZE: 8,
         TEXT_STROKE_THICKNESS: 2,
         SPRITE_BASE_SIZE: 4,
+        SHAKE_ENABLED: true,
         SHAKE: { CAPTURE: 0.5, SPEEDUP: 6, LAST_ONE: 8, BOMB: 4, CRIT: 3, THUD: 4 },
         BOUNCE: { DURATION: 1.0, DECAY: 0.1, MULTIPLIER: 0.5, ELASTICITY: 3 },
         COLORS: {

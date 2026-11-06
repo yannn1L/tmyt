@@ -10,7 +10,7 @@ export const inferno = defineFaction({
     name: 'Inferno',
     key: 'inferno',
     icon: { glyph: '\ue010', unicode: '🔥', color: '#ff2a2a' },
-    baseStats: { att: 80, res: 30, spr: 40 },
+    baseStats: { att: 80, res: 30, spr: 50 },
     traits: {
         isHazard: true,
         isBlocker: false,
@@ -26,7 +26,7 @@ export const inferno = defineFaction({
         hazardBurnSpreadTick: {
             layerKey: 'inferno',
             immuneFactionKey: 'inferno',
-            spreadChance: 0.8,
+            spreadChance: 1.0,
             diminishRate: 15
         },
         hazardIgniteOnAttack: {
